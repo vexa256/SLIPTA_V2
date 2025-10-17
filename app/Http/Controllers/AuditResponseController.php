@@ -171,7 +171,7 @@ class AuditResponseController extends Controller
             'answer'           => 'required|in:Y,P,N,NA',
             'comment'          => [
                 'nullable', 'string', 'max:5000',
-                Rule::requiredIf(fn() => in_array($request->input('answer'), ['P', 'N', 'NA'], true)),
+                Rule::requiredIf(fn() => in_array($request->input('answer'), ['P', 'N'], true)),
             ],
             'na_justification' => [
                 'nullable', 'string', 'max:5000',
@@ -179,7 +179,7 @@ class AuditResponseController extends Controller
             ],
         ], [
             'answer.in'                 => 'Answer must be Y, P, N, or NA',
-            'comment.required'          => 'Comment is REQUIRED for P, N, or NA responses',
+            'comment.required'          => 'Comment is REQUIRED for P or N responses',
             'na_justification.required' => 'Justification is REQUIRED for NA responses',
         ]);
 

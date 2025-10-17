@@ -17,26 +17,331 @@ class AuditResponseController extends Controller
      * CRITICAL FIX 3: Evidence uses 'public' disk
      * CRITICAL FIX 4: Returns 403 JSON for permission errors
      */
+public function index(Request $request)
+{
+    // ————————————————————————————————————————————————————————————————
+    // MODE A: AJAX — select/gate + (optional) save profile snapshot
+    // ————————————————————————————————————————————————————————————————
+    if (($request->ajax() || $request->wantsJson()) && $request->filled('audit_id')) {
+        $auditId = (int) $request->input('audit_id');
 
-    public function index(Request $request)
-    {
         try {
-            $userContext = $this->getUserContext();
+            $ctx = $this->getUserContext();
 
-            $audits = $this->getScopedInProgressAudits($userContext)
-                ->orderByDesc('a.updated_at')
-                ->orderByDesc('a.created_at')
-                ->get();
+            // Scope check
+            if (! $this->canAccessAudit($ctx, $auditId)) {
+                return response()->json([
+                    'ok'    => false,
+                    'code'  => 'forbidden',
+                    'error' => 'Access denied for this audit.',
+                ], 403);
+            }
 
-            return view('audits.select', [
-                'audits'      => $audits,
-                'userContext' => $userContext,
+            // Load core audit+lab+country
+            $audit = DB::table('audits as a')
+                ->join('laboratories as l', 'a.laboratory_id', '=', 'l.id')
+                ->join('countries as c', 'l.country_id', '=', 'c.id')
+                ->where('a.id', $auditId)
+                ->select(
+                    'a.id as audit_id', 'a.opened_on', 'a.last_audit_date', 'a.prior_official_status',
+                    'a.profile_snapshot',
+                    'l.id as lab_id', 'l.name as lab_name', 'l.lab_number', 'l.address', 'l.city',
+                    'l.phone as lab_phone', 'l.email as lab_email', 'l.contact_person',
+                    'l.country_id', 'l.lab_type',
+                    'c.name as country_name'
+                )
+                ->first();
+
+            if (! $audit) {
+                return response()->json([
+                    'ok'    => false,
+                    'code'  => 'not_found',
+                    'error' => 'Audit not found.',
+                ], 404);
+            }
+
+            // Assigned auditors (MANDATORY: must exist)
+            $auditors = DB::table('audit_team_members as atm')
+                ->join('users as u', 'u.id', '=', 'atm.user_id')
+                ->where('atm.audit_id', $auditId)
+                ->select('u.name', 'u.organization')
+                ->get()
+                ->map(fn($r) => [
+                    'name'        => (string) $r->name,
+                    'affiliation' => $r->organization ? (string) $r->organization : null,
+                ])
+                ->values()
+                ->all();
+
+            if (count($auditors) === 0) {
+                // Per requirements: fetched from DB; if none, warn + block
+                return response()->json([
+                    'ok'    => false,
+                    'code'  => 'missing_auditors',
+                    'error' => 'No auditors are assigned to this audit. Assign auditors on the team first.',
+                ], 422);
+            }
+
+            // Helpers
+            $mapLabType = static function (?string $labType): array {
+                $labType = $labType ? strtolower(trim($labType)) : '';
+                return match ($labType) {
+                    'national', 'reference' => ['level' => ['national'], 'affiliation' => ['public']],
+                    'regional'              => ['level' => ['regional'], 'affiliation' => ['public']],
+                    'district'              => ['level' => ['district'], 'affiliation' => ['public']],
+                    'private', 'private_ref'=> ['level' => ['facility', 'private_ref'], 'affiliation' => ['private']],
+                    default                 => ['level' => ['facility'], 'affiliation' => ['public']],
+                };
+            };
+            $defaultStaffing = static function (): array {
+                $mk = static fn($extra = []) => array_merge(['count' => 0, 'adequate' => 'insufficient'], $extra);
+                return [
+                    'degree_professionals'        => $mk(),
+                    'diploma_professionals'       => $mk(),
+                    'certificate_professionals'   => $mk(),
+                    'data_clerks'                 => $mk(),
+                    'phlebotomists'               => $mk(),
+                    'cleaners'                    => $mk(['dedicated' => null, 'trained_safety_waste' => null]),
+                    'drivers_couriers'            => $mk(['dedicated' => null, 'trained_biosafety' => null]),
+                    'other_roles'                 => [['role' => 'MSc holder', 'count' => 0, 'adequate' => 'insufficient', 'note' => null]],
+                    'notes'                       => null,
+                ];
+            };
+            $deepMerge = static function ($snap, $auto) use (&$deepMerge) {
+                if (!is_array($snap)) $snap = [];
+                if (!is_array($auto)) $auto = [];
+                $out = $snap;
+                foreach ($auto as $k => $v) {
+                    if (!array_key_exists($k, $snap) || $snap[$k] === null) {
+                        $out[$k] = $v; // fill missing/null from auto
+                        continue;
+                    }
+                    if (is_array($v) && is_array($snap[$k])) {
+                        $out[$k] = $deepMerge($snap[$k], $v); // recurse
+                    }
+                    // else: snapshot value stands
+                }
+                return $out;
+            };
+
+            // AUTO snapshot (from normalized tables)
+            $prior = $audit->prior_official_status;
+            $auto = [
+                'profile_version' => 'v1',
+                'dates' => [
+                    'this_audit'            => $audit->opened_on ? \Illuminate\Support\Carbon::parse($audit->opened_on)->toDateString() : null,
+                    'last_audit'            => $audit->last_audit_date ? \Illuminate\Support\Carbon::parse($audit->last_audit_date)->toDateString() : null,
+                    'prior_official_status' => ($prior === null || $prior === '') ? 'not_audited' : (string) $prior,
+                ],
+                'auditors' => $auditors, // must be non-empty (enforced above)
+                'laboratory' => [
+                    'name'         => $audit->lab_name,
+                    'lab_number'   => $audit->lab_number,
+                    'address'      => $audit->address,
+                    'city'         => $audit->city,
+                    'country_id'   => (int) $audit->country_id,
+                    'country_name' => $audit->country_name,
+                    'gps'          => ['lat' => null, 'lng' => null],
+                    'phone'        => $audit->lab_phone,
+                    'fax'          => null,
+                    'email'        => $audit->lab_email,
+                    'representative' => [
+                        'name'           => $audit->contact_person,
+                        'phone_personal' => null,
+                        'phone_work'     => null,
+                    ],
+                    'level_affiliation' => array_merge(['other_note' => null], $mapLabType($audit->lab_type)),
+                ],
+                'staffing_summary' => $defaultStaffing(),
+            ];
+
+            // Current snapshot from DB
+            $snapshot = $audit->profile_snapshot ? json_decode($audit->profile_snapshot, true) : [];
+            if (!is_array($snapshot)) $snapshot = [];
+
+            // Merge auto into snapshot (snapshot wins)
+            $merged = $deepMerge($snapshot, $auto);
+
+            // ——— NEW: Accept wizard form override under profile[...] ———
+            $profileForm = $request->input('profile', null);
+            if (is_array($profileForm)) {
+                $asString = fn($v) => ($v === null || $v === '') ? null : (string) $v;
+                $asInt    = fn($v) => ($v === null || $v === '') ? null : (int) $v;
+                $asNum    = fn($v) => ($v === null || $v === '' ? null : (is_numeric($v) ? 0 + $v : null));
+                $asArray  = fn($v) => is_array($v) ? array_values(array_filter($v, fn($x) => $x !== null && $x !== '')) : [];
+
+                // dates
+                if (isset($profileForm['dates'])) {
+                    $merged['dates'] = $merged['dates'] ?? [];
+                    $merged['dates']['this_audit'] = $asString($profileForm['dates']['this_audit'] ?? $merged['dates']['this_audit'] ?? null);
+                    $merged['dates']['last_audit'] = $asString($profileForm['dates']['last_audit'] ?? $merged['dates']['last_audit'] ?? null);
+                    $status = $asString($profileForm['dates']['prior_official_status'] ?? null);
+                    $allowed = ['0','1','2','3','4','5','not_audited'];
+                    if ($status && in_array($status, $allowed, true)) {
+                        $merged['dates']['prior_official_status'] = $status;
+                    }
+                }
+
+                // auditors — NOTE: informational in snapshot; access is still enforced from team members
+                if (isset($profileForm['auditors'])) {
+                    $aud = [];
+                    foreach ($asArray($profileForm['auditors']) as $row) {
+                        if (!is_array($row)) continue;
+                        $name = $asString($row['name'] ?? null);
+                        $aff  = $asString($row['affiliation'] ?? null);
+                        if ($name) $aud[] = ['name' => $name, 'affiliation' => $aff];
+                    }
+                    if (!empty($aud)) $merged['auditors'] = $aud;
+                }
+
+                // laboratory
+                if (isset($profileForm['laboratory'])) {
+                    $merged['laboratory'] = $merged['laboratory'] ?? [];
+                    $lab = $profileForm['laboratory'];
+                    foreach (['name','lab_number','address','city','phone','fax','email','country_name'] as $k) {
+                        if (array_key_exists($k, $lab)) $merged['laboratory'][$k] = $asString($lab[$k]);
+                    }
+                    if (array_key_exists('country_id', $lab)) $merged['laboratory']['country_id'] = $asInt($lab['country_id']);
+
+                    if (isset($lab['representative'])) {
+                        $rep = $lab['representative'];
+                        $merged['laboratory']['representative'] = [
+                            'name'           => $asString($rep['name'] ?? ($merged['laboratory']['representative']['name'] ?? null)),
+                            'phone_work'     => $asString($rep['phone_work'] ?? ($merged['laboratory']['representative']['phone_work'] ?? null)),
+                            'phone_personal' => $asString($rep['phone_personal'] ?? ($merged['laboratory']['representative']['phone_personal'] ?? null)),
+                        ];
+                    }
+                    if (isset($lab['gps'])) {
+                        $gps = $lab['gps'];
+                        $merged['laboratory']['gps'] = [
+                            'lat' => $asNum($gps['lat'] ?? ($merged['laboratory']['gps']['lat'] ?? null)),
+                            'lng' => $asNum($gps['lng'] ?? ($merged['laboratory']['gps']['lng'] ?? null)),
+                        ];
+                    }
+                    if (isset($lab['level_affiliation'])) {
+                        $la = $lab['level_affiliation'];
+                        $levels = array_values(array_unique($asArray($la['level'] ?? [])));
+                        $affils = array_values(array_unique($asArray($la['affiliation'] ?? [])));
+                        $merged['laboratory']['level_affiliation'] = [
+                            'level'       => $levels,
+                            'affiliation' => $affils,
+                            'other_note'  => $asString($la['other_note'] ?? null),
+                        ];
+                    }
+                }
+
+                // staffing_summary
+                if (isset($profileForm['staffing_summary'])) {
+                    $ss = $profileForm['staffing_summary'];
+                    $merged['staffing_summary'] = $merged['staffing_summary'] ?? [];
+                    $roleKeys = [
+                        'degree_professionals','diploma_professionals','certificate_professionals',
+                        'data_clerks','phlebotomists','cleaners','drivers_couriers'
+                    ];
+                    $adequateSet = ['yes','no','insufficient'];
+
+                    foreach ($roleKeys as $rk) {
+                        if (!isset($ss[$rk])) continue;
+                        $node = $ss[$rk];
+                        $merged['staffing_summary'][$rk] = $merged['staffing_summary'][$rk] ?? [];
+                        if (array_key_exists('count', $node)) {
+                            $cnt = $asInt($node['count']);
+                            $merged['staffing_summary'][$rk]['count'] = max(0, (int)($cnt ?? 0));
+                        }
+                        if (array_key_exists('adequate', $node) && in_array($node['adequate'], $adequateSet, true)) {
+                            $merged['staffing_summary'][$rk]['adequate'] = $node['adequate'];
+                        }
+                        foreach (['dedicated','trained_safety_waste','trained_biosafety'] as $flag) {
+                            if (array_key_exists($flag, $node)) {
+                                $v = $node[$flag];
+                                $merged['staffing_summary'][$rk][$flag] =
+                                    ($v === null || $v === '') ? null : (in_array($v, ['1','true','on',1,true], true) ? true : false);
+                            }
+                        }
+                    }
+
+                    // other_roles
+                    if (isset($ss['other_roles'])) {
+                        $or = [];
+                        foreach ($asArray($ss['other_roles']) as $row) {
+                            if (!is_array($row)) continue;
+                            $role = $asString($row['role'] ?? null);
+                            if (!$role) continue;
+                            $cnt  = max(0, (int)($asInt($row['count'] ?? 0)));
+                            $adq  = in_array(($row['adequate'] ?? ''), $adequateSet, true) ? $row['adequate'] : 'insufficient';
+                            $note = $asString($row['note'] ?? null);
+                            $or[] = ['role' => $role, 'count' => $cnt, 'adequate' => $adq, 'note' => $note];
+                        }
+                        $merged['staffing_summary']['other_roles'] = $or;
+                    }
+
+                    if (array_key_exists('notes', $ss)) {
+                        $merged['staffing_summary']['notes'] = $asString($ss['notes']);
+                    }
+                }
+            }
+
+            // Core gating (besides auditors which we enforced from DB)
+            $missing = [];
+            if (empty($merged['laboratory']['name']))          $missing[] = 'laboratory.name';
+            if (empty($merged['laboratory']['lab_number']))    $missing[] = 'laboratory.lab_number';
+            if (empty($merged['laboratory']['country_id']))    $missing[] = 'laboratory.country_id';
+            if (empty($merged['dates']['this_audit']))         $missing[] = 'dates.this_audit';
+
+            if (!empty($missing)) {
+                return response()->json([
+                    'ok'      => false,
+                    'code'    => 'snapshot_missing_core',
+                    'error'   => 'Please complete the required profile fields.',
+                    'missing' => $missing
+                ], 422);
+            }
+
+            // Persist snapshot
+            DB::table('audits')->where('id', $auditId)->update([
+                'profile_snapshot' => json_encode(array_merge(['profile_version' => 'v1'], $merged), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'updated_at'       => now(),
+                'updated_by'       => auth()->id(),
             ]);
-        } catch (Exception $e) {
-            Log::error('Failed to load audit selection', ['error' => $e->getMessage()]);
-            return back()->with('error', 'Failed to load audits: ' . $e->getMessage());
+
+            return response()->json([
+                'ok'       => true,
+                'code'     => 'ready',
+                'snapshot' => $merged,
+            ]);
+
+        } catch (\Throwable $e) {
+            Log::error('Audit select/save failed', ['audit_id' => $auditId, 'error' => $e->getMessage()]);
+            return response()->json([
+                'ok'    => false,
+                'code'  => 'server_error',
+                'error' => 'Failed to prepare/save audit profile: ' . $e->getMessage(),
+            ], 500);
         }
     }
+
+    // ————————————————————————————————————————————————————————————————
+    // MODE B: GET — standard HTML list of scoped in-progress audits
+    // ————————————————————————————————————————————————————————————————
+    try {
+        $userContext = $this->getUserContext();
+
+        $audits = $this->getScopedInProgressAudits($userContext)
+            ->orderByDesc('a.updated_at')
+            ->orderByDesc('a.created_at')
+            ->get();
+
+        return view('audits.select', [
+            'audits'      => $audits,
+            'userContext' => $userContext,
+        ]);
+    } catch (\Throwable $e) {
+        Log::error('Failed to load audit selection', ['error' => $e->getMessage()]);
+        return back()->with('error', 'Failed to load audits: ' . $e->getMessage());
+    }
+}
+
+
 
     public function show($auditId)
     {

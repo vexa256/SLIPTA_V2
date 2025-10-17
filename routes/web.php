@@ -72,19 +72,22 @@ Route::prefix('findings')->name('findings.')->group(function () {
 // });
 
 
-
 Route::middleware(['auth'])->group(function () {
 
-    // Audit selection
+    // Audit selection (HTML page)
     Route::get('/audits/select', [AuditResponseController::class, 'index'])
         ->name('audits.select');
+
+    // Audit selection GATE (AJAX → merges/saves snapshot; blocks if missing auditors/core)
+    Route::post('/audits/select', [AuditResponseController::class, 'index'])
+        ->name('audits.select.gate');
 
     // Audit workspace
     Route::get('/audits/{auditId}', [AuditResponseController::class, 'show'])
         ->whereNumber('auditId')
         ->name('audits.show');
 
-    // Save responses - CRITICAL: These need CSRF protection from web middleware
+    // Save responses
     Route::post('/audits/response', [AuditResponseController::class, 'storeResponse'])
         ->name('audits.responses.store');
 
@@ -94,6 +97,7 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/audits/evidence', [AuditResponseController::class, 'uploadEvidence'])
         ->name('audits.evidence.upload');
 });
+
 
 // Audit Linking Routes (scope-enforced)
 Route::middleware(['auth'])->prefix('audits/linking')->name('audits.linking.')->group(function () {

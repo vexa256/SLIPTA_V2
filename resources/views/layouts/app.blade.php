@@ -9,6 +9,18 @@
     <meta name="csrf-token" content="{{ csrf_token() }}">
 
     <title>SLIPTA Digital Assessment System - Dashboard</title>
+<!-- put this in <head> BEFORE Alpine loads -->
+<script>
+  // make Alpine wait (we'll start it after our component is defined)
+  window.deferAlpineInit = true;
+
+  // global utility used by template bindings
+  window.labelCase = function (v) {
+    const s = (v ?? '').toString().replace(/_/g, ' ').trim();
+    if (!s) return '';
+    return s.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  };
+</script>
 
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>

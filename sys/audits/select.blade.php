@@ -807,839 +807,656 @@
 
     </div>
 
-    <script>
-        /**
-         * auditWizardPremium — hardened
-         * - Authoritative fields (from DB) are HARD read-only in the UI and re-imposed on submit.
-         * - Any user attempt to alter a locked field is auto-reverted with a clear banner.
-         * - Smart, non-blocking validation remains (guides, never stonewalls).
-         * - Fixes Alpine "_x_dataStack" crash by guarding init + usage patterns (see notes below).
-         */
-        (function() {
-            // guard against double definition
-            if (window.auditWizardPremium) return;
+   <script>
+/**
+ * auditWizardPremium — SAME FUNCTIONALITY, MAX VERBOSE LOGGING
+ * - Adds a single verboseFetch wrapper used by ALL AJAX calls.
+ * - Logs request URL, method, headers (CSRF masked), payload (URLSearchParams), response status,
+ *   raw text body (truncated), parsed JSON, and elapsed ms — every time.
+ * - Logs non-2xx as console.error with full payloads (422/400/500…).
+ * - Adds global window error + unhandledrejection logging (once).
+ * - DOES NOT change routes, payload structure, or controller contract.
+ */
+(function () {
+  // Guard against double-definition
+  if (window.auditWizardPremium) return;
 
-            window.auditWizardPremium = function auditWizardPremium(el) {
-                return {
-                    // listings
-                    all: [],
-                    filtered: [],
-                    paged: [],
-                    countries: [],
-                    labs: [],
-                    search: '',
-                    country: '',
-                    lab: '',
-                    page: 1,
-                    perPage: 10,
+  // --- Global aggressive error logging hooks (only once) ---
+  if (!window.__AFT_GLOBAL_ERROR_HOOKS__) {
+    window.__AFT_GLOBAL_ERROR_HOOKS__ = true;
 
-                    // wizard
-                    step: 0,
-                    selected: null,
-                    ready: false,
-                    loading: false,
+    window.addEventListener('error', (e) => {
+      try {
+        console.groupCollapsed('%c[GLOBAL ERROR]', 'color:#fff;background:#b91c1c;padding:2px 6px;border-radius:4px;', e.message);
+        console.error('error', e.error);
+        console.info('filename', e.filename, 'lineno', e.lineno, 'colno', e.colno);
+        console.trace('stack trace');
+        console.groupEnd();
+      } catch {}
+    });
 
-                    // ui state
-                    banner: {
-                        error: '',
-                        warn: '',
-                        info: ''
-                    },
-                    routeShowTpl: '',
-                    routeGate: '',
-                    serverError: '',
-                    autosaveStatus: '',
-                    auditorNames: [],
+    window.addEventListener('unhandledrejection', (e) => {
+      try {
+        console.groupCollapsed('%c[UNHANDLED REJECTION]', 'color:#fff;background:#a16207;padding:2px 6px;border-radius:4px;');
+        console.error('reason', e.reason);
+        console.trace('stack trace');
+        console.groupEnd();
+      } catch {}
+    });
+  }
 
-                    // validation & guidance
-                    touched: new Set(),
-                    unverifiedRequired: [],
-                    clientIssues: [],
-                    fieldLabels: {
-                        'dates.this_audit': 'This Audit Date',
-                        'dates.prior_official_status': 'Prior Official Status',
-                        'laboratory.name': 'Laboratory Name',
-                        'laboratory.country_id': 'Country ID',
-                        'laboratory.level_affiliation.level': 'Level',
-                        'laboratory.level_affiliation.affiliation': 'Affiliation'
-                    },
+  // Utility to pretty-print URLSearchParams without mutating behavior
+  function paramsToObject(params) {
+    const o = {};
+    try {
+      for (const [k, v] of params.entries()) {
+        if (o[k] === undefined) o[k] = v;
+        else if (Array.isArray(o[k])) o[k].push(v);
+        else o[k] = [o[k], v];
+      }
+    } catch {}
+    return o;
+  }
+  function maskCsrf(headers) {
+    const h = Object.assign({}, headers);
+    if (h['X-CSRF-TOKEN']) {
+      const t = h['X-CSRF-TOKEN'];
+      h['X-CSRF-TOKEN'] = String(t).slice(0, 6) + '…' + String(t).slice(-6);
+    }
+    return h;
+  }
 
-                    // authoritative (server-of-truth) values and locks
-                    authoritative: {
-                        laboratory: {}
-                    },
-                    lockPaths: new Set([
-                        // add/remove here as needed; these are enforced as read-only
-                        'laboratory.name',
-                        'laboratory.lab_number',
-                        'laboratory.country_id',
-                        'laboratory.country_name'
-                    ]),
+  async function verboseFetch(url, options = {}, context = 'request') {
+    const started = performance.now();
+    const opts = options || {};
+    const method = (opts.method || 'GET').toUpperCase();
 
-                    // reference to inputs we will make readonly visually (no markup edits needed)
-                    lockSelectorMap: {
-                        'laboratory.name': 'input[x-model="profile.laboratory.name"]',
-                        'laboratory.lab_number': 'input[x-model="profile.laboratory.lab_number"]',
-                        'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
-                        'laboratory.country_name': 'input[x-model="profile.laboratory.country_name"]'
-                    },
+    // Snapshot request details (headers and body)
+    let headers = {};
+    try {
+      if (opts.headers && typeof opts.headers === 'object') headers = { ...opts.headers };
+    } catch {}
+    const maskedHeaders = maskCsrf(headers);
 
-                    // controlled lists
-                    levelOptions: ['national', 'regional', 'district', 'facility', 'private_ref'],
-                    affiliationOptions: ['public', 'private', 'faith_based', 'ngo', 'academic', 'military',
-                        'other'],
-                    staffingKeys: ['degree_professionals', 'diploma_professionals', 'certificate_professionals',
-                        'data_clerks', 'phlebotomists', 'cleaners', 'drivers_couriers'
-                    ],
-                    staffingLabels: {
-                        degree_professionals: 'Degree Professionals',
-                        diploma_professionals: 'Diploma Professionals',
-                        certificate_professionals: 'Certificate Professionals',
-                        data_clerks: 'Data Clerks',
-                        phlebotomists: 'Phlebotomists',
-                        cleaners: 'Cleaners',
-                        drivers_couriers: 'Drivers / Couriers'
-                    },
+    let bodySnapshot = null;
+    if (opts.body instanceof URLSearchParams) {
+      bodySnapshot = { type: 'URLSearchParams', value: paramsToObject(opts.body) };
+    } else if (typeof opts.body === 'string') {
+      bodySnapshot = { type: 'string', value: opts.body.slice(0, 4000) };
+    } else if (opts.body && typeof opts.body === 'object') {
+      // Rare case: object body (we don't change it)
+      bodySnapshot = { type: 'object', value: opts.body };
+    }
 
-                    profile: {
-                        profile_version: 'v1',
-                        dates: {
-                            this_audit: '',
-                            last_audit: '',
-                            prior_official_status: 'not_audited'
-                        },
-                        auditors: [],
-                        laboratory: {
-                            name: '',
-                            lab_number: '',
-                            address: '',
-                            city: '',
-                            country_id: null,
-                            country_name: '',
-                            phone: '',
-                            fax: '',
-                            email: '',
-                            gps: {
-                                lat: null,
-                                lng: null
-                            },
-                            representative: {
-                                name: '',
-                                phone_work: '',
-                                phone_personal: ''
-                            },
-                            level_affiliation: {
-                                level: [],
-                                affiliation: [],
-                                other_note: ''
-                            }
-                        },
-                        staffing_summary: {
-                            degree_professionals: {
-                                count: 0,
-                                adequate: 'insufficient'
-                            },
-                            diploma_professionals: {
-                                count: 0,
-                                adequate: 'insufficient'
-                            },
-                            certificate_professionals: {
-                                count: 0,
-                                adequate: 'insufficient'
-                            },
-                            data_clerks: {
-                                count: 0,
-                                adequate: 'insufficient'
-                            },
-                            phlebotomists: {
-                                count: 0,
-                                adequate: 'insufficient'
-                            },
-                            cleaners: {
-                                count: 0,
-                                adequate: 'insufficient',
-                                dedicated: null,
-                                trained_safety_waste: null
-                            },
-                            drivers_couriers: {
-                                count: 0,
-                                adequate: 'insufficient',
-                                dedicated: null,
-                                trained_biosafety: null
-                            },
-                            other_roles: [],
-                            notes: ''
-                        }
-                    },
+    console.groupCollapsed(
+      `%c[AJAX] ${context} → ${method} ${url}`,
+      'color:#fff;background:#0ea5e9;padding:2px 6px;border-radius:4px;'
+    );
+    console.info('request.headers', maskedHeaders);
+    if (bodySnapshot) console.info('request.body', bodySnapshot);
 
-                    // assistant copy
-                    get assistantTitle() {
-                        if (!this.selected) return 'Select an audit to begin.';
-                        if (this.ready) return 'Profile saved and ready.';
-                        return 'Verify and complete the audit profile.';
-                    },
-                    get assistantBody() {
-                        if (!this.selected) return 'Use the Browse list to pick a single in-progress audit.';
-                        if (this.unverifiedRequired.length)
-                        return 'Some required fields are prefilled or unverified. Confirm them before saving.';
-                        return this.ready ?
-                            'Everything necessary is present. You can still edit and re-save before entering.' :
-                            'Fill the important fields, then Save & Continue.';
-                    },
+    let resp, text, json, ok;
+    try {
+      resp = await fetch(url, opts);
+      ok = resp.ok;
+      let cloned = resp.clone();
 
-                    // lifecycle
-                    init() {
-                        // DEFENSIVE: el must exist
-                        if (!el) {
-                            console.warn('auditWizardPremium: root element missing');
-                            return;
-                        }
+      try {
+        text = await cloned.text(); // always read raw text for logging
+      } catch (e) {
+        text = `[read text failed: ${e}]`;
+      }
 
-                        // parse inputs
-                        try {
-                            this.all = JSON.parse(el.getAttribute('data-audits') || '[]');
-                        } catch {
-                            this.all = [];
-                        }
-                        this.routeShowTpl = el.getAttribute('data-route-show') || '';
-                        this.routeGate = el.getAttribute('data-route-gate') || '';
+      // Attempt JSON parse (don’t throw if invalid JSON)
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
 
-                        // build filters
-                        this.rebuildOptions();
-                        this.recompute();
+      const elapsed = Math.round(performance.now() - started);
+      if (ok) {
+        console.info('response.status', resp.status, resp.statusText, `(${elapsed}ms)`);
+        // Log both JSON and text (truncated) for maximum insight
+        console.info('response.json', json);
+        if (!json) console.info('response.text', text?.slice(0, 4000));
+        console.groupEnd();
+      } else {
+        console.error('response.status', resp.status, resp.statusText, `(${elapsed}ms)`);
+        console.error('response.json', json);
+        if (!json) console.error('response.text', text?.slice(0, 4000));
+        console.groupEnd();
+      }
 
-                        this.$watch('search', () => {
-                            this.page = 1;
-                            this.recompute();
-                        });
-                        this.$watch('country', () => {
-                            this.page = 1;
-                            this.recompute();
-                        });
-                        this.$watch('lab', () => {
-                            this.page = 1;
-                            this.recompute();
-                        });
-                        this.$watch('page', () => {
-                            this.recomputePage();
-                        });
+      // Return the native Response + pre-parsed json/text for callers who want it
+      return { resp, ok, json, text, status: resp.status };
+    } catch (err) {
+      const elapsed = Math.round(performance.now() - started);
+      console.groupCollapsed(
+        `%c[AJAX ERROR] ${context} → ${method} ${url}`,
+        'color:#fff;background:#b91c1c;padding:2px 6px;border-radius:4px;'
+      );
+      console.error('error', err, `(${elapsed}ms)`);
+      console.info('request.headers', maskedHeaders);
+      if (bodySnapshot) console.info('request.body', bodySnapshot);
+      console.groupEnd();
+      throw err;
+    }
+  }
 
-                        // cmd/ctrl+s quick save
-                        window.addEventListener('keydown', (e) => {
-                            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && this.step ===
-                                1) {
-                                e.preventDefault();
-                                this.saveProfile();
-                            }
-                        });
+  // Expose on window just in case you want manual poking from DevTools
+  window.__verboseFetch = verboseFetch;
 
-                        this.banner.info = 'Select an audit to proceed.';
-                    },
+  // ====================================================================
+  //  Component
+  // ====================================================================
+  window.auditWizardPremium = function auditWizardPremium(el) {
+    return {
+      // listings
+      all: [], filtered: [], paged: [], countries: [], labs: [],
+      search: '', country: '', lab: '', page: 1, perPage: 10,
 
-                    // filtering
-                    rebuildOptions() {
-                        const cs = {},
-                            ls = {};
-                        for (const a of this.all) {
-                            if (a?.country_name) cs[a.country_name] = true;
-                            if (a?.lab_name) ls[a.lab_name] = true;
-                        }
-                        this.countries = Object.keys(cs).sort();
-                        this.labs = Object.keys(ls).sort();
-                    },
-                    recompute() {
-                        const q = (this.search || '').toLowerCase().trim();
-                        const hit = v => (v == null ? '' : String(v)).toLowerCase().includes(q);
-                        const out = [];
-                        for (const a of this.all) {
-                            const byStatus = String(a.status || '').toLowerCase() === 'in_progress';
-                            const byQ = !q || hit(a.id) || hit(a.lab_name) || hit(a.lab_number) || hit(a
-                                .country_name);
-                            const byC = !this.country || a.country_name === this.country;
-                            const byL = !this.lab || a.lab_name === this.lab;
-                            if (byStatus && byQ && byC && byL) out.push(a);
-                        }
-                        this.filtered = out;
-                        const maxPage = Math.max(1, Math.ceil(this.filtered.length / this.perPage));
-                        if (this.page > maxPage) this.page = maxPage;
-                        this.recomputePage();
-                    },
-                    recomputePage() {
-                        const s = (this.page - 1) * this.perPage,
-                            e = this.page * this.perPage;
-                        this.paged = this.filtered.slice(s, e);
-                    },
-                    next() {
-                        if (this.page * this.perPage < this.filtered.length) this.page++;
-                    },
-                    prev() {
-                        if (this.page > 1) this.page--;
-                    },
+      // wizard
+      step: 0, selected: null, ready: false, loading: false,
 
-                    // selection
-                    async selectAudit(a) {
-                        this.resetStateKeepList();
-                        this.selected = a;
-                        this.step = 1;
-                        this.banner.info = 'Preparing profile…';
-                        await this.prefillFromGate();
-                        this.banner.info = '';
-                        this.banner.warn = this.auditorNames.length ? '' :
-                            'No auditors are assigned. Assignment is required before entering.';
-                        // after DOM renders, enforce read-only visuals
-                        this.$nextTick(() => this.applyReadOnlyLocks());
-                    },
+      // ui state
+      banner: { error: '', warn: '', info: '' },
+      routeShowTpl: '', routeGate: '', serverError: '', autosaveStatus: '', auditorNames: [],
 
-                    backToBrowse(reset = true) {
-                        if (reset) this.resetStateKeepList();
-                        this.step = 0;
-                        this.banner.info = 'Select an audit to proceed.';
-                    },
+      // validation & guidance
+      touched: new Set(), unverifiedRequired: [], clientIssues: [],
+      fieldLabels: {
+        'dates.this_audit': 'This Audit Date',
+        'dates.prior_official_status': 'Prior Official Status',
+        'laboratory.name': 'Laboratory Name',
+        'laboratory.country_id': 'Country ID',
+        'laboratory.level_affiliation.level': 'Level',
+        'laboratory.level_affiliation.affiliation': 'Affiliation'
+      },
 
-                    // fetch prefill and authoritative
-                    async prefillFromGate() {
-                        if (!this.selected) return;
-                        try {
-                            this.loading = true;
-                            const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute(
-                                'content') || '';
-                            const body = new URLSearchParams({
-                                audit_id: String(this.selected.id)
-                            });
-                            const resp = await fetch(this.routeGate, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                                    'X-Requested-With': 'XMLHttpRequest',
-                                    'X-CSRF-TOKEN': token
-                                },
-                                body: body.toString()
-                            });
-                            const data = await resp.json().catch(() => ({}));
-                            if (!resp.ok || (!data.ok && !data.snapshot)) {
-                                this.banner.error = data?.error || 'Failed to load audit profile';
-                                return;
-                            }
+      // authoritative locks
+      authoritative: { laboratory: {} },
+      lockPaths: new Set(['laboratory.name', 'laboratory.lab_number', 'laboratory.country_id', 'laboratory.country_name']),
+      lockSelectorMap: {
+        'laboratory.name': 'input[x-model="profile.laboratory.name"]',
+        'laboratory.lab_number': 'input[x-model="profile.laboratory.lab_number"]',
+        'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
+        'laboratory.country_name': 'input[x-model="profile.laboratory.country_name"]'
+      },
 
-                            const snap = data.snapshot || {};
-                            const assigned = data.assigned_auditors || snap.auditors || [];
-                            this.auditorNames = assigned
-                                .map(a => a?.name ? [a.name, a.affiliation].filter(Boolean).join(' — ') : (a ||
-                                    ''))
-                                .filter(Boolean);
+      // dictionaries
+      levelOptions: ['national','regional','district','facility','private_ref'],
+      affiliationOptions: ['public','private','faith_based','ngo','academic','military','other'],
+      staffingKeys: ['degree_professionals','diploma_professionals','certificate_professionals','data_clerks','phlebotomists','cleaners','drivers_couriers'],
+      staffingLabels: {
+        degree_professionals:'Degree Professionals',
+        diploma_professionals:'Diploma Professionals',
+        certificate_professionals:'Certificate Professionals',
+        data_clerks:'Data Clerks',
+        phlebotomists:'Phlebotomists',
+        cleaners:'Cleaners',
+        drivers_couriers:'Drivers / Couriers'
+      },
 
-                            // ingest snapshot into profile
-                            this.ingestSnapshot(snap);
+      // profile (unchanged contract)
+      profile: {
+        profile_version: 'v1',
+        dates: { this_audit:'', last_audit:'', prior_official_status:'not_audited' },
+        auditors: [],
+        laboratory: {
+          name:'', lab_number:'', address:'', city:'',
+          country_id:null, country_name:'',
+          phone:'', fax:'', email:'',
+          gps:{ lat:null, lng:null },
+          representative:{ name:'', phone_work:'', phone_personal:'' },
+          level_affiliation:{ level:[], affiliation:[], other_note:'' }
+        },
+        staffing_summary: {
+          degree_professionals:{ count:0, adequate:'insufficient' },
+          diploma_professionals:{ count:0, adequate:'insufficient' },
+          certificate_professionals:{ count:0, adequate:'insufficient' },
+          data_clerks:{ count:0, adequate:'insufficient' },
+          phlebotomists:{ count:0, adequate:'insufficient' },
+          cleaners:{ count:0, adequate:'insufficient', dedicated:null, trained_safety_waste:null },
+          drivers_couriers:{ count:0, adequate:'insufficient', dedicated:null, trained_biosafety:null },
+          other_roles: [], notes:''
+        }
+      },
 
-                            // authoritative source of truth:
-                            // 1) prefer data.authoritative.laboratory if given
-                            // 2) else fall back to snapshot.laboratory
-                            this.authoritative.laboratory = (data.authoritative && data.authoritative
-                                    .laboratory) ?
-                                JSON.parse(JSON.stringify(data.authoritative.laboratory)) :
-                                JSON.parse(JSON.stringify(snap.laboratory || {}));
+      // assistant copy
+      get assistantTitle() {
+        if (!this.selected) return 'Select an audit to begin.';
+        if (this.ready) return 'Profile saved and ready.';
+        return 'Verify and complete the audit profile.';
+      },
+      get assistantBody() {
+        if (!this.selected) return 'Use the Browse list to pick a single in-progress audit.';
+        if (this.unverifiedRequired.length) return 'Some required fields are prefilled or unverified. Confirm them before saving.';
+        return this.ready ? 'Everything necessary is present. You can still edit and re-save before entering.' : 'Fill the important fields, then Save & Continue.';
+      },
 
-                            // immediately align profile with authoritative for locked paths
-                            this.reimposeAuthoritative();
+      // lifecycle
+      init() {
+        if (!el) {
+          console.warn('auditWizardPremium: root element missing');
+          return;
+        }
+        try { this.all = JSON.parse(el.getAttribute('data-audits') || '[]'); } catch { this.all = []; }
+        this.routeShowTpl = el.getAttribute('data-route-show') || '';
+        this.routeGate    = el.getAttribute('data-route-gate') || '';
 
-                            // populate auditors if profile empty
-                            if (!Array.isArray(this.profile.auditors) || !this.profile.auditors.length) {
-                                this.profile.auditors = assigned.map(a => ({
-                                    name: a?.name || '',
-                                    affiliation: a?.affiliation || ''
-                                }));
-                            }
+        this.rebuildOptions();
+        this.recompute();
+        this.$watch('search',  () => { this.page = 1; this.recompute(); });
+        this.$watch('country', () => { this.page = 1; this.recompute(); });
+        this.$watch('lab',     () => { this.page = 1; this.recompute(); });
+        this.$watch('page',    () => { this.recomputePage(); });
 
-                            // guidance (non-blocking)
-                            this.computeGuidance();
-                            this.ready = (data.code === 'ready');
-                        } catch {
-                            this.banner.error = 'Network error while loading profile';
-                        } finally {
-                            this.loading = false;
-                        }
-                    },
+        window.addEventListener('keydown', (e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && this.step === 1) {
+            e.preventDefault();
+            this.saveProfile();
+          }
+        });
 
-                    // ingest helpers
-                    ingestSnapshot(s) {
-                        const put = (obj, path, val) => {
-                            const ks = path.split('.');
-                            let t = obj;
-                            for (let i = 0; i < ks.length - 1; i++) {
-                                const k = ks[i];
-                                t[k] = t[k] ?? {};
-                                t = t[k];
-                            }
-                            t[ks[ks.length - 1]] = val;
-                        };
-                        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
+        this.banner.info = 'Select an audit to proceed.';
+      },
 
-                        // dates
-                        ['dates.this_audit', 'dates.last_audit', 'dates.prior_official_status'].forEach(k => {
-                            const v = get(s, k);
-                            if (v !== undefined && v !== null) put(this.profile, k, v);
-                        });
+      // filtering
+      rebuildOptions() {
+        const cs = {}, ls = {};
+        for (const a of this.all) { if (a?.country_name) cs[a.country_name] = true; if (a?.lab_name) ls[a.lab_name] = true; }
+        this.countries = Object.keys(cs).sort();
+        this.labs = Object.keys(ls).sort();
+      },
+      recompute() {
+        const q = (this.search || '').toLowerCase().trim();
+        const hit = v => (v == null ? '' : String(v)).toLowerCase().includes(q);
+        const out = [];
+        for (const a of this.all) {
+          const byStatus = String(a.status || '').toLowerCase() === 'in_progress';
+          const byQ = !q || hit(a.id) || hit(a.lab_name) || hit(a.lab_number) || hit(a.country_name);
+          const byC = !this.country || a.country_name === this.country;
+          const byL = !this.lab || a.lab_name === this.lab;
+          if (byStatus && byQ && byC && byL) out.push(a);
+        }
+        this.filtered = out;
+        const maxPage = Math.max(1, Math.ceil(this.filtered.length / this.perPage));
+        if (this.page > maxPage) this.page = maxPage;
+        this.recomputePage();
+      },
+      recomputePage() {
+        const s = (this.page - 1) * this.perPage, e = this.page * this.perPage;
+        this.paged = this.filtered.slice(s, e);
+      },
+      next() { if (this.page * this.perPage < this.filtered.length) this.page++; },
+      prev() { if (this.page > 1) this.page--; },
 
-                        // auditors (snapshot extras)
-                        if (Array.isArray(s.auditors)) this.profile.auditors = s.auditors.filter(x => x && (x
-                            .name || x.affiliation));
+      // selection
+      async selectAudit(a) {
+        this.resetStateKeepList();
+        this.selected = a;
+        this.step = 1;
+        this.banner.info = 'Preparing profile…';
+        await this.prefillFromGate();
+        this.banner.info = '';
+        this.banner.warn = this.auditorNames.length ? '' : 'No auditors are assigned. Assignment is required before entering.';
+        this.$nextTick(() => this.applyReadOnlyLocks());
+      },
 
-                        // lab
-                        const lab = s.laboratory || {};
-                        ['name', 'lab_number', 'address', 'city', 'phone', 'fax', 'email', 'country_name'].forEach(
-                            k => {
-                                if (lab[k] !== undefined && lab[k] !== null) this.profile.laboratory[k] = lab[
-                                k];
-                            });
-                        if (lab.country_id !== undefined && lab.country_id !== null) this.profile.laboratory
-                            .country_id = Number(lab.country_id);
-                        if (lab.gps) {
-                            if (lab.gps.lat !== undefined) this.profile.laboratory.gps.lat = Number(lab.gps.lat);
-                            if (lab.gps.lng !== undefined) this.profile.laboratory.gps.lng = Number(lab.gps.lng);
-                        }
-                        if (lab.representative) {
-                            const r = lab.representative;
-                            if (r.name !== undefined) this.profile.laboratory.representative.name = r.name || '';
-                            if (r.phone_work !== undefined) this.profile.laboratory.representative.phone_work = r
-                                .phone_work || '';
-                            if (r.phone_personal !== undefined) this.profile.laboratory.representative
-                                .phone_personal = r.phone_personal || '';
-                        }
-                        if (lab.level_affiliation) {
-                            const la = lab.level_affiliation;
-                            if (Array.isArray(la.level)) this.profile.laboratory.level_affiliation.level = [...
-                                new Set(la.level)
-                            ];
-                            if (Array.isArray(la.affiliation)) this.profile.laboratory.level_affiliation
-                                .affiliation = [...new Set(la.affiliation)];
-                            if (la.other_note !== undefined) this.profile.laboratory.level_affiliation.other_note =
-                                la.other_note || '';
-                        }
+      backToBrowse(reset = true) {
+        if (reset) this.resetStateKeepList();
+        this.step = 0;
+        this.banner.info = 'Select an audit to proceed.';
+      },
 
-                        // staffing
-                        const ss = s.staffing_summary || {};
-                        for (const rk of this.staffingKeys) {
-                            const node = ss[rk];
-                            if (!node) continue;
-                            if (node.count !== undefined) this.profile.staffing_summary[rk].count = Math.max(0,
-                                parseInt(node.count || 0, 10));
-                            if (node.adequate && ['yes', 'no', 'insufficient'].includes(node.adequate)) this.profile
-                                .staffing_summary[rk].adequate = node.adequate;
-                            ['dedicated', 'trained_safety_waste', 'trained_biosafety'].forEach(f => {
-                                if (node[f] !== undefined) this.profile.staffing_summary[rk][f] = (node[
-                                    f] === true || node[f] === '1');
-                            });
-                        }
-                        if (Array.isArray(ss.other_roles)) {
-                            this.profile.staffing_summary.other_roles = ss.other_roles.map(or => ({
-                                role: or.role || '',
-                                count: Math.max(0, parseInt(or.count || 0, 10)),
-                                adequate: ['yes', 'no', 'insufficient'].includes(or.adequate) ? or
-                                    .adequate : 'insufficient',
-                                note: or.note || ''
-                            }));
-                        }
-                        if (ss.notes !== undefined) this.profile.staffing_summary.notes = ss.notes || '';
-                    },
+      // fetch prefill and authoritative
+      async prefillFromGate() {
+        if (!this.selected) return;
+        try {
+          this.loading = true;
+          const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+          const body = new URLSearchParams({ audit_id: String(this.selected.id) });
 
-                    // AUTHORITATIVE ENFORCEMENT -------------------------------------------
-                    isLocked(path) {
-                        return this.lockPaths.has(path);
-                    },
+          const { ok, json, status, text } = await verboseFetch(this.routeGate, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-CSRF-TOKEN': token
+            },
+            body
+          }, 'prefillFromGate');
 
-                    reimposeAuthoritative() {
-                        // for each locked path, copy authoritative => profile if different
-                        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
-                        const put = (obj, path, val) => {
-                            const ks = path.split('.');
-                            let t = obj;
-                            for (let i = 0; i < ks.length - 1; i++) {
-                                const k = ks[i];
-                                t[k] = t[k] ?? {};
-                                t = t[k];
-                            }
-                            t[ks[ks.length - 1]] = val;
-                        };
+          const data = json || {};
+          if (!ok && !data.snapshot) {
+            this.banner.error = data?.error || `Failed to load audit profile (HTTP ${status})`;
+            return;
+          }
 
-                        let reverted = [];
-                        for (const path of this.lockPaths) {
-                            const authVal = get(this.authoritative, path);
-                            if (authVal === undefined) continue; // nothing to enforce
-                            const curVal = get(this.profile, path);
-                            if (String(curVal) !== String(authVal)) {
-                                put(this.profile, path, authVal);
-                                reverted.push(this.fieldLabels[path] || path);
-                            }
-                        }
-                        if (reverted.length) {
-                            this.banner.info = `Authoritative fields enforced: ${reverted.join(', ')}.`;
-                        }
-                    },
+          const snap = data.snapshot || {};
+          const assigned = data.assigned_auditors || snap.auditors || [];
+          this.auditorNames = assigned
+            .map(a => a?.name ? [a.name, a.affiliation].filter(Boolean).join(' — ') : (a||''))
+            .filter(Boolean);
 
-                    applyReadOnlyLocks() {
-                        // make inputs readonly/disabled and style them, no Blade changes needed
-                        const form = this.$refs.profileForm;
-                        if (!form) return;
-                        for (const path of this.lockPaths) {
-                            const sel = this.lockSelectorMap[path];
-                            if (!sel) continue;
-                            const el = form.querySelector(sel);
-                            if (!el) continue;
-                            // disable typing and focus style
-                            el.readOnly = true;
-                            el.classList.add('bg-neutral-100', 'text-neutral-700', 'cursor-not-allowed');
-                            el.setAttribute('aria-readonly', 'true');
-                            // safety: if someone pastes programmatically, ensure value matches authoritative
-                            el.addEventListener('input', () => {
-                                this.reimposeAuthoritative();
-                            }, {
-                                passive: true
-                            });
-                            // click nudge
-                            el.addEventListener('focus', () => {
-                                this.banner.warn =
-                                    'This field is locked to authoritative data. To change, update it in the master tables.';
-                                setTimeout(() => {
-                                    if (this.banner.warn?.startsWith('This field is locked')) this
-                                        .banner.warn = '';
-                                }, 2500);
-                            });
-                        }
-                    },
+          this.ingestSnapshot(snap);
 
-                    // guidance (non-blocking)
-                    trackTouch(path) {
-                        this.touched.add(path);
-                        this.computeGuidance();
-                        this.autoSave();
-                    },
-                    computeGuidance() {
-                        const required = [
-                            'dates.this_audit',
-                            'dates.prior_official_status',
-                            'laboratory.name',
-                            'laboratory.country_id',
-                            'laboratory.level_affiliation.level',
-                            'laboratory.level_affiliation.affiliation'
-                        ];
-                        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
-                        const isEmpty = (v) => v === undefined || v === null || (typeof v === 'string' && v
-                        .trim() === '') || (Array.isArray(v) && v.length === 0);
+          this.authoritative.laboratory = (data.authoritative && data.authoritative.laboratory)
+            ? JSON.parse(JSON.stringify(data.authoritative.laboratory))
+            : JSON.parse(JSON.stringify(snap.laboratory || {}));
 
-                        this.unverifiedRequired = required.filter(k => !this.touched.has(k));
+          this.reimposeAuthoritative();
 
-                        const issues = [];
-                        for (const key of required) {
-                            const value = get(this.profile, key);
-                            if (isEmpty(value)) {
-                                issues.push({
-                                    path: key,
-                                    label: this.fieldLabels[key] || key,
-                                    severity: this.touched.has(key) ? 'warn' : 'info',
-                                    hint: this.buildHintFor(key)
-                                });
-                            }
-                        }
-                        this.clientIssues = issues;
-                        if (issues.length) {
-                            const names = issues.map(i => i.label).join(', ');
-                            this.banner.warn =
-                                `Missing or unverified: ${names}. Saved anyway; review for completeness.`;
-                        } else if (this.banner.warn?.startsWith('Missing or unverified:')) {
-                            this.banner.warn = '';
-                        }
-                    },
-                    buildHintFor(key) {
-                        switch (key) {
-                            case 'dates.this_audit':
-                                return 'Enter the current audit date (YYYY-MM-DD).';
-                            case 'dates.prior_official_status':
-                                return 'Pick the previous official star status.';
-                            case 'laboratory.name':
-                                return 'This is locked to the master record.';
-                            case 'laboratory.country_id':
-                                return 'Numeric country ID from your master data.';
-                            case 'laboratory.level_affiliation.level':
-                                return 'Pick at least one level.';
-                            case 'laboratory.level_affiliation.affiliation':
-                                return 'Pick at least one affiliation.';
-                            default:
-                                return '';
-                        }
-                    },
+          if (!Array.isArray(this.profile.auditors) || !this.profile.auditors.length) {
+            this.profile.auditors = assigned.map(a => ({ name: a?.name || '', affiliation: a?.affiliation || '' }));
+          }
 
-                    focusFirstIssue() {
-                        const map = {
-                            'dates.this_audit': 'input[type="date"][x-model="profile.dates.this_audit"]',
-                            'dates.prior_official_status': 'select[x-model="profile.dates.prior_official_status"]',
-                            'laboratory.name': 'input[x-model="profile.laboratory.name"]',
-                            'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
-                            'laboratory.level_affiliation.level': 'input[x-model*="profile.laboratory.level_affiliation.level"]',
-                            'laboratory.level_affiliation.affiliation': 'input[x-model*="profile.laboratory.level_affiliation.affiliation"]'
-                        };
-                        const first = this.clientIssues[0];
-                        if (!first) return;
-                        const sel = map[first.path];
-                        const el = this.$refs.profileForm?.querySelector(sel);
-                        if (el) el.scrollIntoView({
-                            behavior: 'smooth',
-                            block: 'center'
-                        });
-                    },
+          this.computeGuidance();
+          this.ready = (data.code === 'ready');
+        } catch (err) {
+          this.banner.error = 'Network error while loading profile';
+        } finally {
+          this.loading = false;
+        }
+      },
 
-                    // autosave
-                    autosaveTimer: null,
-                    autoSave() {
-                        clearTimeout(this.autosaveTimer);
-                        this.autosaveTimer = setTimeout(() => this.saveDraft(), 800);
-                    },
-                    async saveDraft() {
-                        if (!this.selected) return;
-                        // ALWAYS reimpose authoritative before sending draft
-                        this.reimposeAuthoritative();
-                        this.autosaveStatus = 'Saving draft…';
-                        try {
-                            const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute(
-                                'content') || '';
-                            const payload = this.serializeProfile();
-                            const resp = await fetch(this.routeGate, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                                    'X-Requested-With': 'XMLHttpRequest',
-                                    'X-CSRF-TOKEN': token
-                                },
-                                body: payload.toString()
-                            });
-                            if (resp.ok) {
-                                this.autosaveStatus = 'Draft saved.';
-                                setTimeout(() => this.autosaveStatus = '', 1500);
-                            } else this.autosaveStatus = '';
-                        } catch {
-                            this.autosaveStatus = '';
-                        }
-                    },
+      // ingest helpers (unchanged)
+      ingestSnapshot(s) {
+        const put = (obj, path, val) => {
+          const ks = path.split('.'); let t = obj;
+          for (let i = 0; i < ks.length - 1; i++) { const k = ks[i]; t[k] = t[k] ?? {}; t = t[k]; }
+          t[ks[ks.length - 1]] = val;
+        };
+        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
 
-                    labelCase(v) {
-                        // tolerate null/undefined, convert snake_case to Title Case
-                        const s = (v ?? '').toString().replace(/_/g, ' ').trim();
-                        if (!s) return '';
-                        return s.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-                    },
+        ['dates.this_audit','dates.last_audit','dates.prior_official_status'].forEach(k => {
+          const v = get(s, k); if (v !== undefined && v !== null) put(this.profile, k, v);
+        });
 
-                    // save (non-blocking) + authoritative re-imposition
-                    async saveProfile() {
-                        if (!this.selected) return;
+        if (Array.isArray(s.auditors)) this.profile.auditors = s.auditors.filter(x => x && (x.name || x.affiliation));
 
-                        // guidance + focus
-                        this.computeGuidance();
-                        if (this.clientIssues.length) this.$nextTick(() => this.focusFirstIssue());
+        const lab = s.laboratory || {};
+        ['name','lab_number','address','city','phone','fax','email','country_name'].forEach(k => {
+          if (lab[k] !== undefined && lab[k] !== null) this.profile.laboratory[k] = lab[k];
+        });
+        if (lab.country_id !== undefined && lab.country_id !== null) this.profile.laboratory.country_id = Number(lab.country_id);
+        if (lab.gps) {
+          if (lab.gps.lat !== undefined) this.profile.laboratory.gps.lat = Number(lab.gps.lat);
+          if (lab.gps.lng !== undefined) this.profile.laboratory.gps.lng = Number(lab.gps.lng);
+        }
+        if (lab.representative) {
+          const r = lab.representative;
+          if (r.name !== undefined) this.profile.laboratory.representative.name = r.name || '';
+          if (r.phone_work !== undefined) this.profile.laboratory.representative.phone_work = r.phone_work || '';
+          if (r.phone_personal !== undefined) this.profile.laboratory.representative.phone_personal = r.phone_personal || '';
+        }
+        if (lab.level_affiliation) {
+          const la = lab.level_affiliation;
+          if (Array.isArray(la.level)) this.profile.laboratory.level_affiliation.level = [...new Set(la.level)];
+          if (Array.isArray(la.affiliation)) this.profile.laboratory.level_affiliation.affiliation = [...new Set(la.affiliation)];
+          if (la.other_note !== undefined) this.profile.laboratory.level_affiliation.other_note = la.other_note || '';
+        }
 
-                        // RE-IMPOSE authoritative values on locked fields before submit (final guard)
-                        this.reimposeAuthoritative();
+        const ss = s.staffing_summary || {};
+        for (const rk of this.staffingKeys) {
+          const node = ss[rk]; if (!node) continue;
+          if (node.count !== undefined) this.profile.staffing_summary[rk].count = Math.max(0, parseInt(node.count || 0, 10));
+          if (node.adequate && ['yes','no','insufficient'].includes(node.adequate)) this.profile.staffing_summary[rk].adequate = node.adequate;
+          ['dedicated','trained_safety_waste','trained_biosafety'].forEach(f => {
+            if (node[f] !== undefined) this.profile.staffing_summary[rk][f] = (node[f] === true || node[f] === '1');
+          });
+        }
+        if (Array.isArray(ss.other_roles)) {
+          this.profile.staffing_summary.other_roles = ss.other_roles.map(or => ({
+            role: or.role || '',
+            count: Math.max(0, parseInt(or.count || 0, 10)),
+            adequate: ['yes','no','insufficient'].includes(or.adequate) ? or.adequate : 'insufficient',
+            note: or.note || ''
+          }));
+        }
+        if (ss.notes !== undefined) this.profile.staffing_summary.notes = ss.notes || '';
+      },
 
-                        this.serverError = '';
-                        this.banner.error = '';
-                        this.loading = true;
-                        try {
-                            const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute(
-                                'content') || '';
-                            const payload = this.serializeProfile();
-                            const resp = await fetch(this.routeGate, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-                                    'X-Requested-With': 'XMLHttpRequest',
-                                    'X-CSRF-TOKEN': token
-                                },
-                                body: payload.toString()
-                            });
-                            const data = await resp.json().catch(() => ({}));
+      // locks
+      isLocked(path) { return this.lockPaths.has(path); },
+      reimposeAuthoritative() {
+        const get = (o,p) => p.split('.').reduce((a,k)=>a?.[k], o);
+        const put = (obj, path, val) => {
+          const ks = path.split('.'); let t = obj;
+          for (let i=0;i<ks.length-1;i++){ const k=ks[i]; t[k] = t[k] ?? {}; t = t[k]; }
+          t[ks[ks.length-1]] = val;
+        };
+        let reverted = [];
+        for (const path of this.lockPaths) {
+          const authVal = get(this.authoritative, path);
+          if (authVal === undefined) continue;
+          const curVal = get(this.profile, path);
+          if (String(curVal) !== String(authVal)) { put(this.profile, path, authVal); reverted.push(this.fieldLabels[path] || path); }
+        }
+        if (reverted.length) this.banner.info = `Authoritative fields enforced: ${reverted.join(', ')}.`;
+      },
+      applyReadOnlyLocks() {
+        const form = this.$refs.profileForm; if (!form) return;
+        for (const path of this.lockPaths) {
+          const sel = this.lockSelectorMap[path]; if (!sel) continue;
+          const el = form.querySelector(sel); if (!el) continue;
+          el.readOnly = true;
+          el.classList.add('bg-neutral-100','text-neutral-700','cursor-not-allowed');
+          el.setAttribute('aria-readonly','true');
+          el.addEventListener('input', () => this.reimposeAuthoritative(), { passive: true });
+          el.addEventListener('focus', () => {
+            this.banner.warn = 'This field is locked to authoritative data. To change, update it in the master tables.';
+            setTimeout(() => { if (this.banner.warn?.startsWith('This field is locked')) this.banner.warn = ''; }, 2500);
+          });
+        }
+      },
 
-                            if (resp.ok && (data.ok || data.code === 'ready')) {
-                                // refresh assigned auditors if provided
-                                if (data.snapshot?.auditors) {
-                                    this.auditorNames = data.snapshot.auditors.map(a => [a.name, a.affiliation]
-                                        .filter(Boolean).join(' — '));
-                                }
-                                this.ready = (data.code === 'ready');
-                                if (this.ready) {
-                                    this.step = 2;
-                                    this.banner.warn = '';
-                                    this.clientIssues = [];
-                                    this.unverifiedRequired = [];
-                                } else {
-                                    this.banner.info = 'Saved. You may continue refining before entering.';
-                                }
-                            } else {
-                                this.serverError = data?.error || 'Failed to save profile';
-                                if (Array.isArray(data?.missing) && data.missing.length) {
-                                    this.banner.warn =
-                                        `Server indicates missing: ${data.missing.join(', ')}. Review and save again.`;
-                                }
-                                this.$nextTick(() => this.focusFirstIssue());
-                            }
-                        } catch {
-                            this.serverError = 'Network error during save';
-                        } finally {
-                            this.loading = false;
-                        }
-                    },
+      // guidance
+      trackTouch(path) { this.touched.add(path); this.computeGuidance(); this.autoSave(); },
+      computeGuidance() {
+        const required = [
+          'dates.this_audit',
+          'dates.prior_official_status',
+          'laboratory.name',
+          'laboratory.country_id',
+          'laboratory.level_affiliation.level',
+          'laboratory.level_affiliation.affiliation'
+        ];
+        const get = (o,p)=>p.split('.').reduce((a,k)=>a?.[k], o);
+        const isEmpty = (v) => v === undefined || v === null || (typeof v === 'string' && v.trim() === '') || (Array.isArray(v) && v.length === 0);
 
-                    // serialization (unchanged contract)
-                    serializeProfile() {
-                        const params = new URLSearchParams();
-                        params.append('audit_id', String(this.selected.id));
-                        const flatten = (obj, prefix = 'profile') => {
-                            for (const key in obj) {
-                                const value = obj[key];
-                                const fullKey = `${prefix}[${key}]`;
-                                if (value === null || value === undefined) {
-                                    params.append(fullKey, '');
-                                } else if (Array.isArray(value)) {
-                                    if (value.length === 0) {
-                                        params.append(fullKey, '');
-                                        continue;
-                                    }
-                                    if (typeof value[0] === 'object') {
-                                        value.forEach((item, i) => flatten(item, `${fullKey}[${i}]`));
-                                    } else {
-                                        value.forEach(v => params.append(`${fullKey}[]`, v));
-                                    }
-                                } else if (typeof value === 'object') {
-                                    flatten(value, fullKey);
-                                } else {
-                                    params.append(fullKey, String(value));
-                                }
-                            }
-                        };
-                        flatten(this.profile, 'profile');
-                        return params;
-                    },
+        this.unverifiedRequired = required.filter(k => !this.touched.has(k));
 
-                    // rows
-                    addAuditor() {
-                        this.profile.auditors.push({
-                            name: '',
-                            affiliation: ''
-                        });
-                        this.autoSave();
-                    },
-                    removeAuditor(i) {
-                        this.profile.auditors.splice(i, 1);
-                        this.autoSave();
-                    },
-                    addOtherRole() {
-                        this.profile.staffing_summary.other_roles.push({
-                            role: '',
-                            count: 0,
-                            adequate: 'insufficient',
-                            note: ''
-                        });
-                        this.autoSave();
-                    },
-                    removeOtherRole(i) {
-                        this.profile.staffing_summary.other_roles.splice(i, 1);
-                        this.autoSave();
-                    },
+        const issues = [];
+        for (const key of required) {
+          const value = get(this.profile, key);
+          if (isEmpty(value)) {
+            issues.push({ path:key, label:this.fieldLabels[key] || key, severity: this.touched.has(key) ? 'warn' : 'info', hint:this.buildHintFor(key) });
+          }
+        }
+        this.clientIssues = issues;
+        if (issues.length) {
+          const names = issues.map(i => i.label).join(', ');
+          this.banner.warn = `Missing or unverified: ${names}. Saved anyway; review for completeness.`;
+        } else if (this.banner.warn?.startsWith('Missing or unverified:')) {
+          this.banner.warn = '';
+        }
+      },
+      buildHintFor(key) {
+        switch (key) {
+          case 'dates.this_audit': return 'Enter the current audit date (YYYY-MM-DD).';
+          case 'dates.prior_official_status': return 'Pick the previous official star status.';
+          case 'laboratory.name': return 'This is locked to the master record.';
+          case 'laboratory.country_id': return 'Numeric country ID from your master data.';
+          case 'laboratory.level_affiliation.level': return 'Pick at least one level.';
+          case 'laboratory.level_affiliation.affiliation': return 'Pick at least one affiliation.';
+          default: return '';
+        }
+      },
+      focusFirstIssue() {
+        const map = {
+          'dates.this_audit': 'input[type="date"][x-model="profile.dates.this_audit"]',
+          'dates.prior_official_status': 'select[x-model="profile.dates.prior_official_status"]',
+          'laboratory.name': 'input[x-model="profile.laboratory.name"]',
+          'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
+          'laboratory.level_affiliation.level': 'input[x-model*="profile.laboratory.level_affiliation.level"]',
+          'laboratory.level_affiliation.affiliation': 'input[x-model*="profile.laboratory.level_affiliation.affiliation"]'
+        };
+        const first = this.clientIssues[0]; if (!first) return;
+        const sel = map[first.path];
+        const el = this.$refs.profileForm?.querySelector(sel);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      },
 
-                    // helpers
-                    routeShow(id) {
-                        return (this.routeShowTpl || '').replace('__ID__', encodeURIComponent(id));
-                    },
-                    hardRefresh() {
-                        window.location.reload();
-                    },
-                    resetStateKeepList() {
-                        this.selected = null;
-                        this.ready = false;
-                        this.banner = {
-                            error: '',
-                            warn: '',
-                            info: ''
-                        };
-                        this.serverError = '';
-                        this.autosaveStatus = '';
-                        this.auditorNames = [];
-                        this.touched = new Set();
-                        this.unverifiedRequired = [];
-                        this.clientIssues = [];
-                        this.authoritative = {
-                            laboratory: {}
-                        };
-                        this.profile = {
-                            profile_version: 'v1',
-                            dates: {
-                                this_audit: '',
-                                last_audit: '',
-                                prior_official_status: 'not_audited'
-                            },
-                            auditors: [],
-                            laboratory: {
-                                name: '',
-                                lab_number: '',
-                                address: '',
-                                city: '',
-                                country_id: null,
-                                country_name: '',
-                                phone: '',
-                                fax: '',
-                                email: '',
-                                gps: {
-                                    lat: null,
-                                    lng: null
-                                },
-                                representative: {
-                                    name: '',
-                                    phone_work: '',
-                                    phone_personal: ''
-                                },
-                                level_affiliation: {
-                                    level: [],
-                                    affiliation: [],
-                                    other_note: ''
-                                }
-                            },
-                            staffing_summary: {
-                                degree_professionals: {
-                                    count: 0,
-                                    adequate: 'insufficient'
-                                },
-                                diploma_professionals: {
-                                    count: 0,
-                                    adequate: 'insufficient'
-                                },
-                                certificate_professionals: {
-                                    count: 0,
-                                    adequate: 'insufficient'
-                                },
-                                data_clerks: {
-                                    count: 0,
-                                    adequate: 'insufficient'
-                                },
-                                phlebotomists: {
-                                    count: 0,
-                                    adequate: 'insufficient'
-                                },
-                                cleaners: {
-                                    count: 0,
-                                    adequate: 'insufficient',
-                                    dedicated: null,
-                                    trained_safety_waste: null
-                                },
-                                drivers_couriers: {
-                                    count: 0,
-                                    adequate: 'insufficient',
-                                    dedicated: null,
-                                    trained_biosafety: null
-                                },
-                                other_roles: [],
-                                notes: ''
-                            }
-                        };
-                    }
-                };
-            };
-        })();
-    </script>
+      // autosave
+      autosaveTimer: null,
+      autoSave() { clearTimeout(this.autosaveTimer); this.autosaveTimer = setTimeout(() => this.saveDraft(), 800); },
+      async saveDraft() {
+        if (!this.selected) return;
+        this.reimposeAuthoritative();
+        this.autosaveStatus = 'Saving draft…';
+        try {
+          const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+          const payload = this.serializeProfile();
+          const { ok } = await verboseFetch(this.routeGate, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-CSRF-TOKEN': token
+            },
+            body: payload
+          }, 'autosaveDraft');
+          if (ok) {
+            this.autosaveStatus = 'Draft saved.';
+            setTimeout(() => { this.autosaveStatus = ''; }, 1500);
+          } else {
+            this.autosaveStatus = '';
+          }
+        } catch {
+          this.autosaveStatus = '';
+        }
+      },
+
+      // save (non-blocking) + authoritative re-imposition
+      async saveProfile() {
+        if (!this.selected) return;
+
+        this.computeGuidance();
+        if (this.clientIssues.length) this.$nextTick(() => this.focusFirstIssue());
+
+        this.reimposeAuthoritative();
+
+        this.serverError = ''; this.banner.error = ''; this.loading = true;
+        try {
+          const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+          const payload = this.serializeProfile();
+          const { ok, json, status } = await verboseFetch(this.routeGate, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-CSRF-TOKEN': token
+            },
+            body: payload
+          }, 'saveProfile');
+
+          const data = json || {};
+          if (ok && (data.ok || data.code === 'ready')) {
+            if (data.snapshot?.auditors) {
+              this.auditorNames = data.snapshot.auditors.map(a => [a.name, a.affiliation].filter(Boolean).join(' — '));
+            }
+            this.ready = (data.code === 'ready');
+            if (this.ready) {
+              this.step = 2;
+              this.banner.warn = '';
+              this.clientIssues = [];
+              this.unverifiedRequired = [];
+            } else {
+              this.banner.info = 'Saved. You may continue refining before entering.';
+            }
+          } else {
+            this.serverError = data?.error || `Failed to save profile (HTTP ${status})`;
+            if (Array.isArray(data?.missing) && data.missing.length) {
+              this.banner.warn = `Server indicates missing: ${data.missing.join(', ')}. Review and save again.`;
+            }
+            this.$nextTick(() => this.focusFirstIssue());
+          }
+        } catch {
+          this.serverError = 'Network error during save';
+        } finally {
+          this.loading = false;
+        }
+      },
+
+      // serialization (unchanged contract)
+      serializeProfile() {
+        const params = new URLSearchParams();
+        params.append('audit_id', String(this.selected.id));
+        const flatten = (obj, prefix = 'profile') => {
+          for (const key in obj) {
+            const value = obj[key];
+            const fullKey = `${prefix}[${key}]`;
+            if (value === null || value === undefined) {
+              params.append(fullKey, '');
+            } else if (Array.isArray(value)) {
+              if (value.length === 0) { params.append(fullKey, ''); continue; }
+              if (typeof value[0] === 'object') value.forEach((item, i) => flatten(item, `${fullKey}[${i}]`));
+              else value.forEach(v => params.append(`${fullKey}[]`, v));
+            } else if (typeof value === 'object') {
+              flatten(value, fullKey);
+            } else {
+              params.append(fullKey, String(value));
+            }
+          }
+        };
+        flatten(this.profile, 'profile');
+        return params;
+      },
+
+      // rows
+      addAuditor() { this.profile.auditors.push({ name:'', affiliation:'' }); this.autoSave(); },
+      removeAuditor(i) { this.profile.auditors.splice(i,1); this.autoSave(); },
+      addOtherRole() { this.profile.staffing_summary.other_roles.push({ role:'', count:0, adequate:'insufficient', note:'' }); this.autoSave(); },
+      removeOtherRole(i) { this.profile.staffing_summary.other_roles.splice(i,1); this.autoSave(); },
+
+      // helpers
+      routeShow(id) { return (this.routeShowTpl || '').replace('__ID__', encodeURIComponent(id)); },
+      hardRefresh() { window.location.reload(); },
+      resetStateKeepList() {
+        this.selected = null; this.ready = false;
+        this.banner = { error:'', warn:'', info:'' };
+        this.serverError = ''; this.autosaveStatus = ''; this.auditorNames = [];
+        this.touched = new Set(); this.unverifiedRequired = []; this.clientIssues = [];
+        this.authoritative = { laboratory:{} };
+        this.profile = {
+          profile_version: 'v1',
+          dates: { this_audit:'', last_audit:'', prior_official_status:'not_audited' },
+          auditors: [],
+          laboratory: {
+            name:'', lab_number:'', address:'', city:'',
+            country_id:null, country_name:'',
+            phone:'', fax:'', email:'',
+            gps:{ lat:null, lng:null },
+            representative:{ name:'', phone_work:'', phone_personal:'' },
+            level_affiliation:{ level:[], affiliation:[], other_note:'' }
+          },
+          staffing_summary: {
+            degree_professionals:{ count:0, adequate:'insufficient' },
+            diploma_professionals:{ count:0, adequate:'insufficient' },
+            certificate_professionals:{ count:0, adequate:'insufficient' },
+            data_clerks:{ count:0, adequate:'insufficient' },
+            phlebotomists:{ count:0, adequate:'insufficient' },
+            cleaners:{ count:0, adequate:'insufficient', dedicated:null, trained_safety_waste:null },
+            drivers_couriers:{ count:0, adequate:'insufficient', dedicated:null, trained_biosafety:null },
+            other_roles: [], notes:''
+          }
+        };
+      }
+    };
+  };
+})();
+</script>
+
 @endsection

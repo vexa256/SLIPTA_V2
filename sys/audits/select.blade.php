@@ -17,7 +17,8 @@
                             </svg>
                         </div>
                         <div>
-                            <h1 class="text-base sm:text-lg font-semibold text-neutral-900 tracking-tight">SLIPTA Audits (Only Audits with more than one team member are shown)
+                            <h1 class="text-base sm:text-lg font-semibold text-neutral-900 tracking-tight">SLIPTA Audits
+                                (Only Audits with more than one team member are shown)
                             </h1>
                             <p class="text-xs text-neutral-500 hidden sm:block">Select → Verify → Enter</p>
                         </div>
@@ -807,674 +808,983 @@
 
     </div>
 
-   <script>
-/**
- * auditWizardPremium — SAME FUNCTIONALITY, MAX VERBOSE LOGGING
- * - Adds a single verboseFetch wrapper used by ALL AJAX calls.
- * - Logs request URL, method, headers (CSRF masked), payload (URLSearchParams), response status,
- *   raw text body (truncated), parsed JSON, and elapsed ms — every time.
- * - Logs non-2xx as console.error with full payloads (422/400/500…).
- * - Adds global window error + unhandledrejection logging (once).
- * - DOES NOT change routes, payload structure, or controller contract.
- */
-(function () {
-  // Guard against double-definition
-  if (window.auditWizardPremium) return;
+    <script>
+        /**
+         * auditWizardPremium — SAME FUNCTIONALITY, MAX VERBOSE LOGGING
+         * - Adds a single verboseFetch wrapper used by ALL AJAX calls.
+         * - Logs request URL, method, headers (CSRF masked), payload (URLSearchParams), response status,
+         *   raw text body (truncated), parsed JSON, and elapsed ms — every time.
+         * - Logs non-2xx as console.error with full payloads (422/400/500…).
+         * - Adds global window error + unhandledrejection logging (once).
+         * - DOES NOT change routes, payload structure, or controller contract.
+         */
+        (function() {
+            // Guard against double-definition
+            if (window.auditWizardPremium) return;
 
-  // --- Global aggressive error logging hooks (only once) ---
-  if (!window.__AFT_GLOBAL_ERROR_HOOKS__) {
-    window.__AFT_GLOBAL_ERROR_HOOKS__ = true;
+            // --- Global aggressive error logging hooks (only once) ---
+            if (!window.__AFT_GLOBAL_ERROR_HOOKS__) {
+                window.__AFT_GLOBAL_ERROR_HOOKS__ = true;
 
-    window.addEventListener('error', (e) => {
-      try {
-        console.groupCollapsed('%c[GLOBAL ERROR]', 'color:#fff;background:#b91c1c;padding:2px 6px;border-radius:4px;', e.message);
-        console.error('error', e.error);
-        console.info('filename', e.filename, 'lineno', e.lineno, 'colno', e.colno);
-        console.trace('stack trace');
-        console.groupEnd();
-      } catch {}
-    });
+                window.addEventListener('error', (e) => {
+                    try {
+                        console.groupCollapsed('%c[GLOBAL ERROR]',
+                            'color:#fff;background:#b91c1c;padding:2px 6px;border-radius:4px;', e.message);
+                        console.error('error', e.error);
+                        console.info('filename', e.filename, 'lineno', e.lineno, 'colno', e.colno);
+                        console.trace('stack trace');
+                        console.groupEnd();
+                    } catch {}
+                });
 
-    window.addEventListener('unhandledrejection', (e) => {
-      try {
-        console.groupCollapsed('%c[UNHANDLED REJECTION]', 'color:#fff;background:#a16207;padding:2px 6px;border-radius:4px;');
-        console.error('reason', e.reason);
-        console.trace('stack trace');
-        console.groupEnd();
-      } catch {}
-    });
-  }
-
-  // Utility to pretty-print URLSearchParams without mutating behavior
-  function paramsToObject(params) {
-    const o = {};
-    try {
-      for (const [k, v] of params.entries()) {
-        if (o[k] === undefined) o[k] = v;
-        else if (Array.isArray(o[k])) o[k].push(v);
-        else o[k] = [o[k], v];
-      }
-    } catch {}
-    return o;
-  }
-  function maskCsrf(headers) {
-    const h = Object.assign({}, headers);
-    if (h['X-CSRF-TOKEN']) {
-      const t = h['X-CSRF-TOKEN'];
-      h['X-CSRF-TOKEN'] = String(t).slice(0, 6) + '…' + String(t).slice(-6);
-    }
-    return h;
-  }
-
-  async function verboseFetch(url, options = {}, context = 'request') {
-    const started = performance.now();
-    const opts = options || {};
-    const method = (opts.method || 'GET').toUpperCase();
-
-    // Snapshot request details (headers and body)
-    let headers = {};
-    try {
-      if (opts.headers && typeof opts.headers === 'object') headers = { ...opts.headers };
-    } catch {}
-    const maskedHeaders = maskCsrf(headers);
-
-    let bodySnapshot = null;
-    if (opts.body instanceof URLSearchParams) {
-      bodySnapshot = { type: 'URLSearchParams', value: paramsToObject(opts.body) };
-    } else if (typeof opts.body === 'string') {
-      bodySnapshot = { type: 'string', value: opts.body.slice(0, 4000) };
-    } else if (opts.body && typeof opts.body === 'object') {
-      // Rare case: object body (we don't change it)
-      bodySnapshot = { type: 'object', value: opts.body };
-    }
-
-    console.groupCollapsed(
-      `%c[AJAX] ${context} → ${method} ${url}`,
-      'color:#fff;background:#0ea5e9;padding:2px 6px;border-radius:4px;'
-    );
-    console.info('request.headers', maskedHeaders);
-    if (bodySnapshot) console.info('request.body', bodySnapshot);
-
-    let resp, text, json, ok;
-    try {
-      resp = await fetch(url, opts);
-      ok = resp.ok;
-      let cloned = resp.clone();
-
-      try {
-        text = await cloned.text(); // always read raw text for logging
-      } catch (e) {
-        text = `[read text failed: ${e}]`;
-      }
-
-      // Attempt JSON parse (don’t throw if invalid JSON)
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = null;
-      }
-
-      const elapsed = Math.round(performance.now() - started);
-      if (ok) {
-        console.info('response.status', resp.status, resp.statusText, `(${elapsed}ms)`);
-        // Log both JSON and text (truncated) for maximum insight
-        console.info('response.json', json);
-        if (!json) console.info('response.text', text?.slice(0, 4000));
-        console.groupEnd();
-      } else {
-        console.error('response.status', resp.status, resp.statusText, `(${elapsed}ms)`);
-        console.error('response.json', json);
-        if (!json) console.error('response.text', text?.slice(0, 4000));
-        console.groupEnd();
-      }
-
-      // Return the native Response + pre-parsed json/text for callers who want it
-      return { resp, ok, json, text, status: resp.status };
-    } catch (err) {
-      const elapsed = Math.round(performance.now() - started);
-      console.groupCollapsed(
-        `%c[AJAX ERROR] ${context} → ${method} ${url}`,
-        'color:#fff;background:#b91c1c;padding:2px 6px;border-radius:4px;'
-      );
-      console.error('error', err, `(${elapsed}ms)`);
-      console.info('request.headers', maskedHeaders);
-      if (bodySnapshot) console.info('request.body', bodySnapshot);
-      console.groupEnd();
-      throw err;
-    }
-  }
-
-  // Expose on window just in case you want manual poking from DevTools
-  window.__verboseFetch = verboseFetch;
-
-  // ====================================================================
-  //  Component
-  // ====================================================================
-  window.auditWizardPremium = function auditWizardPremium(el) {
-    return {
-      // listings
-      all: [], filtered: [], paged: [], countries: [], labs: [],
-      search: '', country: '', lab: '', page: 1, perPage: 10,
-
-      // wizard
-      step: 0, selected: null, ready: false, loading: false,
-
-      // ui state
-      banner: { error: '', warn: '', info: '' },
-      routeShowTpl: '', routeGate: '', serverError: '', autosaveStatus: '', auditorNames: [],
-
-      // validation & guidance
-      touched: new Set(), unverifiedRequired: [], clientIssues: [],
-      fieldLabels: {
-        'dates.this_audit': 'This Audit Date',
-        'dates.prior_official_status': 'Prior Official Status',
-        'laboratory.name': 'Laboratory Name',
-        'laboratory.country_id': 'Country ID',
-        'laboratory.level_affiliation.level': 'Level',
-        'laboratory.level_affiliation.affiliation': 'Affiliation'
-      },
-
-      // authoritative locks
-      authoritative: { laboratory: {} },
-      lockPaths: new Set(['laboratory.name', 'laboratory.lab_number', 'laboratory.country_id', 'laboratory.country_name']),
-      lockSelectorMap: {
-        'laboratory.name': 'input[x-model="profile.laboratory.name"]',
-        'laboratory.lab_number': 'input[x-model="profile.laboratory.lab_number"]',
-        'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
-        'laboratory.country_name': 'input[x-model="profile.laboratory.country_name"]'
-      },
-
-      // dictionaries
-      levelOptions: ['national','regional','district','facility','private_ref'],
-      affiliationOptions: ['public','private','faith_based','ngo','academic','military','other'],
-      staffingKeys: ['degree_professionals','diploma_professionals','certificate_professionals','data_clerks','phlebotomists','cleaners','drivers_couriers'],
-      staffingLabels: {
-        degree_professionals:'Degree Professionals',
-        diploma_professionals:'Diploma Professionals',
-        certificate_professionals:'Certificate Professionals',
-        data_clerks:'Data Clerks',
-        phlebotomists:'Phlebotomists',
-        cleaners:'Cleaners',
-        drivers_couriers:'Drivers / Couriers'
-      },
-
-      // profile (unchanged contract)
-      profile: {
-        profile_version: 'v1',
-        dates: { this_audit:'', last_audit:'', prior_official_status:'not_audited' },
-        auditors: [],
-        laboratory: {
-          name:'', lab_number:'', address:'', city:'',
-          country_id:null, country_name:'',
-          phone:'', fax:'', email:'',
-          gps:{ lat:null, lng:null },
-          representative:{ name:'', phone_work:'', phone_personal:'' },
-          level_affiliation:{ level:[], affiliation:[], other_note:'' }
-        },
-        staffing_summary: {
-          degree_professionals:{ count:0, adequate:'insufficient' },
-          diploma_professionals:{ count:0, adequate:'insufficient' },
-          certificate_professionals:{ count:0, adequate:'insufficient' },
-          data_clerks:{ count:0, adequate:'insufficient' },
-          phlebotomists:{ count:0, adequate:'insufficient' },
-          cleaners:{ count:0, adequate:'insufficient', dedicated:null, trained_safety_waste:null },
-          drivers_couriers:{ count:0, adequate:'insufficient', dedicated:null, trained_biosafety:null },
-          other_roles: [], notes:''
-        }
-      },
-
-      // assistant copy
-      get assistantTitle() {
-        if (!this.selected) return 'Select an audit to begin.';
-        if (this.ready) return 'Profile saved and ready.';
-        return 'Verify and complete the audit profile.';
-      },
-      get assistantBody() {
-        if (!this.selected) return 'Use the Browse list to pick a single in-progress audit.';
-        if (this.unverifiedRequired.length) return 'Some required fields are prefilled or unverified. Confirm them before saving.';
-        return this.ready ? 'Everything necessary is present. You can still edit and re-save before entering.' : 'Fill the important fields, then Save & Continue.';
-      },
-
-      // lifecycle
-      init() {
-        if (!el) {
-          console.warn('auditWizardPremium: root element missing');
-          return;
-        }
-        try { this.all = JSON.parse(el.getAttribute('data-audits') || '[]'); } catch { this.all = []; }
-        this.routeShowTpl = el.getAttribute('data-route-show') || '';
-        this.routeGate    = el.getAttribute('data-route-gate') || '';
-
-        this.rebuildOptions();
-        this.recompute();
-        this.$watch('search',  () => { this.page = 1; this.recompute(); });
-        this.$watch('country', () => { this.page = 1; this.recompute(); });
-        this.$watch('lab',     () => { this.page = 1; this.recompute(); });
-        this.$watch('page',    () => { this.recomputePage(); });
-
-        window.addEventListener('keydown', (e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && this.step === 1) {
-            e.preventDefault();
-            this.saveProfile();
-          }
-        });
-
-        this.banner.info = 'Select an audit to proceed.';
-      },
-
-      // filtering
-      rebuildOptions() {
-        const cs = {}, ls = {};
-        for (const a of this.all) { if (a?.country_name) cs[a.country_name] = true; if (a?.lab_name) ls[a.lab_name] = true; }
-        this.countries = Object.keys(cs).sort();
-        this.labs = Object.keys(ls).sort();
-      },
-      recompute() {
-        const q = (this.search || '').toLowerCase().trim();
-        const hit = v => (v == null ? '' : String(v)).toLowerCase().includes(q);
-        const out = [];
-        for (const a of this.all) {
-          const byStatus = String(a.status || '').toLowerCase() === 'in_progress';
-          const byQ = !q || hit(a.id) || hit(a.lab_name) || hit(a.lab_number) || hit(a.country_name);
-          const byC = !this.country || a.country_name === this.country;
-          const byL = !this.lab || a.lab_name === this.lab;
-          if (byStatus && byQ && byC && byL) out.push(a);
-        }
-        this.filtered = out;
-        const maxPage = Math.max(1, Math.ceil(this.filtered.length / this.perPage));
-        if (this.page > maxPage) this.page = maxPage;
-        this.recomputePage();
-      },
-      recomputePage() {
-        const s = (this.page - 1) * this.perPage, e = this.page * this.perPage;
-        this.paged = this.filtered.slice(s, e);
-      },
-      next() { if (this.page * this.perPage < this.filtered.length) this.page++; },
-      prev() { if (this.page > 1) this.page--; },
-
-      // selection
-     async selectAudit(a) {
-  this.resetStateKeepList();
-  this.selected = a;
-  this.banner.info = 'Preparing profile…';
-
-  try {
-    // wait for the gate to pass before moving steps
-    const gateOk = await this.prefillFromGate(); // if this returns nothing, it's fine — success path won't throw
-
-    this.banner.info = '';
-
-    // only advance after a successful gate
-    this.step = 1;
-
-    // require at least 2 members (not just "any")
-    this.banner.warn = (this.auditorNames?.length || 0) < 2
-      ? 'At least 2 team members are required.'
-      : '';
-
-    this.$nextTick(() => this.applyReadOnlyLocks());
-  } catch (e) {
-    // gate failed (e.g., 422 insufficient_auditors or network)
-    this.banner.info = '';
-    this.banner.warn = e?.message || 'This audit cannot be opened (likely under-staffed).';
-    // keep user on Browse (step stays 0)
-  }
-}
-,
-
-      backToBrowse(reset = true) {
-        if (reset) this.resetStateKeepList();
-        this.step = 0;
-        this.banner.info = 'Select an audit to proceed.';
-      },
-
-      // fetch prefill and authoritative
-      async prefillFromGate() {
-        if (!this.selected) return;
-        try {
-          this.loading = true;
-          const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-          const body = new URLSearchParams({ audit_id: String(this.selected.id) });
-
-          const { ok, json, status, text } = await verboseFetch(this.routeGate, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-              'X-Requested-With': 'XMLHttpRequest',
-              'X-CSRF-TOKEN': token
-            },
-            body
-          }, 'prefillFromGate');
-
-          const data = json || {};
-          if (!ok && !data.snapshot) {
-            this.banner.error = data?.error || `Failed to load audit profile (HTTP ${status})`;
-            return;
-          }
-
-          const snap = data.snapshot || {};
-          const assigned = data.assigned_auditors || snap.auditors || [];
-          this.auditorNames = assigned
-            .map(a => a?.name ? [a.name, a.affiliation].filter(Boolean).join(' — ') : (a||''))
-            .filter(Boolean);
-
-          this.ingestSnapshot(snap);
-
-          this.authoritative.laboratory = (data.authoritative && data.authoritative.laboratory)
-            ? JSON.parse(JSON.stringify(data.authoritative.laboratory))
-            : JSON.parse(JSON.stringify(snap.laboratory || {}));
-
-          this.reimposeAuthoritative();
-
-          if (!Array.isArray(this.profile.auditors) || !this.profile.auditors.length) {
-            this.profile.auditors = assigned.map(a => ({ name: a?.name || '', affiliation: a?.affiliation || '' }));
-          }
-
-          this.computeGuidance();
-          this.ready = (data.code === 'ready');
-        } catch (err) {
-          this.banner.error = 'Network error while loading profile';
-        } finally {
-          this.loading = false;
-        }
-      },
-
-      // ingest helpers (unchanged)
-      ingestSnapshot(s) {
-        const put = (obj, path, val) => {
-          const ks = path.split('.'); let t = obj;
-          for (let i = 0; i < ks.length - 1; i++) { const k = ks[i]; t[k] = t[k] ?? {}; t = t[k]; }
-          t[ks[ks.length - 1]] = val;
-        };
-        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
-
-        ['dates.this_audit','dates.last_audit','dates.prior_official_status'].forEach(k => {
-          const v = get(s, k); if (v !== undefined && v !== null) put(this.profile, k, v);
-        });
-
-        if (Array.isArray(s.auditors)) this.profile.auditors = s.auditors.filter(x => x && (x.name || x.affiliation));
-
-        const lab = s.laboratory || {};
-        ['name','lab_number','address','city','phone','fax','email','country_name'].forEach(k => {
-          if (lab[k] !== undefined && lab[k] !== null) this.profile.laboratory[k] = lab[k];
-        });
-        if (lab.country_id !== undefined && lab.country_id !== null) this.profile.laboratory.country_id = Number(lab.country_id);
-        if (lab.gps) {
-          if (lab.gps.lat !== undefined) this.profile.laboratory.gps.lat = Number(lab.gps.lat);
-          if (lab.gps.lng !== undefined) this.profile.laboratory.gps.lng = Number(lab.gps.lng);
-        }
-        if (lab.representative) {
-          const r = lab.representative;
-          if (r.name !== undefined) this.profile.laboratory.representative.name = r.name || '';
-          if (r.phone_work !== undefined) this.profile.laboratory.representative.phone_work = r.phone_work || '';
-          if (r.phone_personal !== undefined) this.profile.laboratory.representative.phone_personal = r.phone_personal || '';
-        }
-        if (lab.level_affiliation) {
-          const la = lab.level_affiliation;
-          if (Array.isArray(la.level)) this.profile.laboratory.level_affiliation.level = [...new Set(la.level)];
-          if (Array.isArray(la.affiliation)) this.profile.laboratory.level_affiliation.affiliation = [...new Set(la.affiliation)];
-          if (la.other_note !== undefined) this.profile.laboratory.level_affiliation.other_note = la.other_note || '';
-        }
-
-        const ss = s.staffing_summary || {};
-        for (const rk of this.staffingKeys) {
-          const node = ss[rk]; if (!node) continue;
-          if (node.count !== undefined) this.profile.staffing_summary[rk].count = Math.max(0, parseInt(node.count || 0, 10));
-          if (node.adequate && ['yes','no','insufficient'].includes(node.adequate)) this.profile.staffing_summary[rk].adequate = node.adequate;
-          ['dedicated','trained_safety_waste','trained_biosafety'].forEach(f => {
-            if (node[f] !== undefined) this.profile.staffing_summary[rk][f] = (node[f] === true || node[f] === '1');
-          });
-        }
-        if (Array.isArray(ss.other_roles)) {
-          this.profile.staffing_summary.other_roles = ss.other_roles.map(or => ({
-            role: or.role || '',
-            count: Math.max(0, parseInt(or.count || 0, 10)),
-            adequate: ['yes','no','insufficient'].includes(or.adequate) ? or.adequate : 'insufficient',
-            note: or.note || ''
-          }));
-        }
-        if (ss.notes !== undefined) this.profile.staffing_summary.notes = ss.notes || '';
-      },
-
-      // locks
-      isLocked(path) { return this.lockPaths.has(path); },
-      reimposeAuthoritative() {
-        const get = (o,p) => p.split('.').reduce((a,k)=>a?.[k], o);
-        const put = (obj, path, val) => {
-          const ks = path.split('.'); let t = obj;
-          for (let i=0;i<ks.length-1;i++){ const k=ks[i]; t[k] = t[k] ?? {}; t = t[k]; }
-          t[ks[ks.length-1]] = val;
-        };
-        let reverted = [];
-        for (const path of this.lockPaths) {
-          const authVal = get(this.authoritative, path);
-          if (authVal === undefined) continue;
-          const curVal = get(this.profile, path);
-          if (String(curVal) !== String(authVal)) { put(this.profile, path, authVal); reverted.push(this.fieldLabels[path] || path); }
-        }
-        if (reverted.length) this.banner.info = `Authoritative fields enforced: ${reverted.join(', ')}.`;
-      },
-      applyReadOnlyLocks() {
-        const form = this.$refs.profileForm; if (!form) return;
-        for (const path of this.lockPaths) {
-          const sel = this.lockSelectorMap[path]; if (!sel) continue;
-          const el = form.querySelector(sel); if (!el) continue;
-          el.readOnly = true;
-          el.classList.add('bg-neutral-100','text-neutral-700','cursor-not-allowed');
-          el.setAttribute('aria-readonly','true');
-          el.addEventListener('input', () => this.reimposeAuthoritative(), { passive: true });
-          el.addEventListener('focus', () => {
-            this.banner.warn = 'This field is locked to authoritative data. To change, update it in the master tables.';
-            setTimeout(() => { if (this.banner.warn?.startsWith('This field is locked')) this.banner.warn = ''; }, 2500);
-          });
-        }
-      },
-
-      // guidance
-      trackTouch(path) { this.touched.add(path); this.computeGuidance(); this.autoSave(); },
-      computeGuidance() {
-        const required = [
-          'dates.this_audit',
-          'dates.prior_official_status',
-          'laboratory.name',
-          'laboratory.country_id',
-          'laboratory.level_affiliation.level',
-          'laboratory.level_affiliation.affiliation'
-        ];
-        const get = (o,p)=>p.split('.').reduce((a,k)=>a?.[k], o);
-        const isEmpty = (v) => v === undefined || v === null || (typeof v === 'string' && v.trim() === '') || (Array.isArray(v) && v.length === 0);
-
-        this.unverifiedRequired = required.filter(k => !this.touched.has(k));
-
-        const issues = [];
-        for (const key of required) {
-          const value = get(this.profile, key);
-          if (isEmpty(value)) {
-            issues.push({ path:key, label:this.fieldLabels[key] || key, severity: this.touched.has(key) ? 'warn' : 'info', hint:this.buildHintFor(key) });
-          }
-        }
-        this.clientIssues = issues;
-        if (issues.length) {
-          const names = issues.map(i => i.label).join(', ');
-          this.banner.warn = `Missing or unverified: ${names}. Saved anyway; review for completeness.`;
-        } else if (this.banner.warn?.startsWith('Missing or unverified:')) {
-          this.banner.warn = '';
-        }
-      },
-      buildHintFor(key) {
-        switch (key) {
-          case 'dates.this_audit': return 'Enter the current audit date (YYYY-MM-DD).';
-          case 'dates.prior_official_status': return 'Pick the previous official star status.';
-          case 'laboratory.name': return 'This is locked to the master record.';
-          case 'laboratory.country_id': return 'Numeric country ID from your master data.';
-          case 'laboratory.level_affiliation.level': return 'Pick at least one level.';
-          case 'laboratory.level_affiliation.affiliation': return 'Pick at least one affiliation.';
-          default: return '';
-        }
-      },
-      focusFirstIssue() {
-        const map = {
-          'dates.this_audit': 'input[type="date"][x-model="profile.dates.this_audit"]',
-          'dates.prior_official_status': 'select[x-model="profile.dates.prior_official_status"]',
-          'laboratory.name': 'input[x-model="profile.laboratory.name"]',
-          'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
-          'laboratory.level_affiliation.level': 'input[x-model*="profile.laboratory.level_affiliation.level"]',
-          'laboratory.level_affiliation.affiliation': 'input[x-model*="profile.laboratory.level_affiliation.affiliation"]'
-        };
-        const first = this.clientIssues[0]; if (!first) return;
-        const sel = map[first.path];
-        const el = this.$refs.profileForm?.querySelector(sel);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      },
-
-      // autosave
-      autosaveTimer: null,
-      autoSave() { clearTimeout(this.autosaveTimer); this.autosaveTimer = setTimeout(() => this.saveDraft(), 800); },
-      async saveDraft() {
-        if (!this.selected) return;
-        this.reimposeAuthoritative();
-        this.autosaveStatus = 'Saving draft…';
-        try {
-          const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-          const payload = this.serializeProfile();
-          const { ok } = await verboseFetch(this.routeGate, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-              'X-Requested-With': 'XMLHttpRequest',
-              'X-CSRF-TOKEN': token
-            },
-            body: payload
-          }, 'autosaveDraft');
-          if (ok) {
-            this.autosaveStatus = 'Draft saved.';
-            setTimeout(() => { this.autosaveStatus = ''; }, 1500);
-          } else {
-            this.autosaveStatus = '';
-          }
-        } catch {
-          this.autosaveStatus = '';
-        }
-      },
-
-      // save (non-blocking) + authoritative re-imposition
-      async saveProfile() {
-        if (!this.selected) return;
-
-        this.computeGuidance();
-        if (this.clientIssues.length) this.$nextTick(() => this.focusFirstIssue());
-
-        this.reimposeAuthoritative();
-
-        this.serverError = ''; this.banner.error = ''; this.loading = true;
-        try {
-          const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
-          const payload = this.serializeProfile();
-          const { ok, json, status } = await verboseFetch(this.routeGate, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-              'X-Requested-With': 'XMLHttpRequest',
-              'X-CSRF-TOKEN': token
-            },
-            body: payload
-          }, 'saveProfile');
-
-          const data = json || {};
-          if (ok && (data.ok || data.code === 'ready')) {
-            if (data.snapshot?.auditors) {
-              this.auditorNames = data.snapshot.auditors.map(a => [a.name, a.affiliation].filter(Boolean).join(' — '));
+                window.addEventListener('unhandledrejection', (e) => {
+                    try {
+                        console.groupCollapsed('%c[UNHANDLED REJECTION]',
+                            'color:#fff;background:#a16207;padding:2px 6px;border-radius:4px;');
+                        console.error('reason', e.reason);
+                        console.trace('stack trace');
+                        console.groupEnd();
+                    } catch {}
+                });
             }
-            this.ready = (data.code === 'ready');
-            if (this.ready) {
-              this.step = 2;
-              this.banner.warn = '';
-              this.clientIssues = [];
-              this.unverifiedRequired = [];
-            } else {
-              this.banner.info = 'Saved. You may continue refining before entering.';
+
+            // Utility to pretty-print URLSearchParams without mutating behavior
+            function paramsToObject(params) {
+                const o = {};
+                try {
+                    for (const [k, v] of params.entries()) {
+                        if (o[k] === undefined) o[k] = v;
+                        else if (Array.isArray(o[k])) o[k].push(v);
+                        else o[k] = [o[k], v];
+                    }
+                } catch {}
+                return o;
             }
-          } else {
-            this.serverError = data?.error || `Failed to save profile (HTTP ${status})`;
-            if (Array.isArray(data?.missing) && data.missing.length) {
-              this.banner.warn = `Server indicates missing: ${data.missing.join(', ')}. Review and save again.`;
+
+            function maskCsrf(headers) {
+                const h = Object.assign({}, headers);
+                if (h['X-CSRF-TOKEN']) {
+                    const t = h['X-CSRF-TOKEN'];
+                    h['X-CSRF-TOKEN'] = String(t).slice(0, 6) + '…' + String(t).slice(-6);
+                }
+                return h;
             }
-            this.$nextTick(() => this.focusFirstIssue());
-          }
-        } catch {
-          this.serverError = 'Network error during save';
-        } finally {
-          this.loading = false;
-        }
-      },
 
-      // serialization (unchanged contract)
-      serializeProfile() {
-        const params = new URLSearchParams();
-        params.append('audit_id', String(this.selected.id));
-        const flatten = (obj, prefix = 'profile') => {
-          for (const key in obj) {
-            const value = obj[key];
-            const fullKey = `${prefix}[${key}]`;
-            if (value === null || value === undefined) {
-              params.append(fullKey, '');
-            } else if (Array.isArray(value)) {
-              if (value.length === 0) { params.append(fullKey, ''); continue; }
-              if (typeof value[0] === 'object') value.forEach((item, i) => flatten(item, `${fullKey}[${i}]`));
-              else value.forEach(v => params.append(`${fullKey}[]`, v));
-            } else if (typeof value === 'object') {
-              flatten(value, fullKey);
-            } else {
-              params.append(fullKey, String(value));
+            async function verboseFetch(url, options = {}, context = 'request') {
+                const started = performance.now();
+                const opts = options || {};
+                const method = (opts.method || 'GET').toUpperCase();
+
+                // Snapshot request details (headers and body)
+                let headers = {};
+                try {
+                    if (opts.headers && typeof opts.headers === 'object') headers = {
+                        ...opts.headers
+                    };
+                } catch {}
+                const maskedHeaders = maskCsrf(headers);
+
+                let bodySnapshot = null;
+                if (opts.body instanceof URLSearchParams) {
+                    bodySnapshot = {
+                        type: 'URLSearchParams',
+                        value: paramsToObject(opts.body)
+                    };
+                } else if (typeof opts.body === 'string') {
+                    bodySnapshot = {
+                        type: 'string',
+                        value: opts.body.slice(0, 4000)
+                    };
+                } else if (opts.body && typeof opts.body === 'object') {
+                    // Rare case: object body (we don't change it)
+                    bodySnapshot = {
+                        type: 'object',
+                        value: opts.body
+                    };
+                }
+
+                console.groupCollapsed(
+                    `%c[AJAX] ${context} → ${method} ${url}`,
+                    'color:#fff;background:#0ea5e9;padding:2px 6px;border-radius:4px;'
+                );
+                console.info('request.headers', maskedHeaders);
+                if (bodySnapshot) console.info('request.body', bodySnapshot);
+
+                let resp, text, json, ok;
+                try {
+                    resp = await fetch(url, opts);
+                    ok = resp.ok;
+                    let cloned = resp.clone();
+
+                    try {
+                        text = await cloned.text(); // always read raw text for logging
+                    } catch (e) {
+                        text = `[read text failed: ${e}]`;
+                    }
+
+                    // Attempt JSON parse (don’t throw if invalid JSON)
+                    try {
+                        json = text ? JSON.parse(text) : null;
+                    } catch {
+                        json = null;
+                    }
+
+                    const elapsed = Math.round(performance.now() - started);
+                    if (ok) {
+                        console.info('response.status', resp.status, resp.statusText, `(${elapsed}ms)`);
+                        // Log both JSON and text (truncated) for maximum insight
+                        console.info('response.json', json);
+                        if (!json) console.info('response.text', text?.slice(0, 4000));
+                        console.groupEnd();
+                    } else {
+                        console.error('response.status', resp.status, resp.statusText, `(${elapsed}ms)`);
+                        console.error('response.json', json);
+                        if (!json) console.error('response.text', text?.slice(0, 4000));
+                        console.groupEnd();
+                    }
+
+                    // Return the native Response + pre-parsed json/text for callers who want it
+                    return {
+                        resp,
+                        ok,
+                        json,
+                        text,
+                        status: resp.status
+                    };
+                } catch (err) {
+                    const elapsed = Math.round(performance.now() - started);
+                    console.groupCollapsed(
+                        `%c[AJAX ERROR] ${context} → ${method} ${url}`,
+                        'color:#fff;background:#b91c1c;padding:2px 6px;border-radius:4px;'
+                    );
+                    console.error('error', err, `(${elapsed}ms)`);
+                    console.info('request.headers', maskedHeaders);
+                    if (bodySnapshot) console.info('request.body', bodySnapshot);
+                    console.groupEnd();
+                    throw err;
+                }
             }
-          }
-        };
-        flatten(this.profile, 'profile');
-        return params;
-      },
 
-      // rows
-      addAuditor() { this.profile.auditors.push({ name:'', affiliation:'' }); this.autoSave(); },
-      removeAuditor(i) { this.profile.auditors.splice(i,1); this.autoSave(); },
-      addOtherRole() { this.profile.staffing_summary.other_roles.push({ role:'', count:0, adequate:'insufficient', note:'' }); this.autoSave(); },
-      removeOtherRole(i) { this.profile.staffing_summary.other_roles.splice(i,1); this.autoSave(); },
+            // Expose on window just in case you want manual poking from DevTools
+            window.__verboseFetch = verboseFetch;
 
-      // helpers
-      routeShow(id) { return (this.routeShowTpl || '').replace('__ID__', encodeURIComponent(id)); },
-      hardRefresh() { window.location.reload(); },
-      resetStateKeepList() {
-        this.selected = null; this.ready = false;
-        this.banner = { error:'', warn:'', info:'' };
-        this.serverError = ''; this.autosaveStatus = ''; this.auditorNames = [];
-        this.touched = new Set(); this.unverifiedRequired = []; this.clientIssues = [];
-        this.authoritative = { laboratory:{} };
-        this.profile = {
-          profile_version: 'v1',
-          dates: { this_audit:'', last_audit:'', prior_official_status:'not_audited' },
-          auditors: [],
-          laboratory: {
-            name:'', lab_number:'', address:'', city:'',
-            country_id:null, country_name:'',
-            phone:'', fax:'', email:'',
-            gps:{ lat:null, lng:null },
-            representative:{ name:'', phone_work:'', phone_personal:'' },
-            level_affiliation:{ level:[], affiliation:[], other_note:'' }
-          },
-          staffing_summary: {
-            degree_professionals:{ count:0, adequate:'insufficient' },
-            diploma_professionals:{ count:0, adequate:'insufficient' },
-            certificate_professionals:{ count:0, adequate:'insufficient' },
-            data_clerks:{ count:0, adequate:'insufficient' },
-            phlebotomists:{ count:0, adequate:'insufficient' },
-            cleaners:{ count:0, adequate:'insufficient', dedicated:null, trained_safety_waste:null },
-            drivers_couriers:{ count:0, adequate:'insufficient', dedicated:null, trained_biosafety:null },
-            other_roles: [], notes:''
-          }
-        };
-      }
-    };
-  };
-})();
-</script>
+            // ====================================================================
+            //  Component
+            // ====================================================================
+            window.auditWizardPremium = function auditWizardPremium(el) {
+                return {
+                    // listings
+                    all: [],
+                    filtered: [],
+                    paged: [],
+                    countries: [],
+                    labs: [],
+                    search: '',
+                    country: '',
+                    lab: '',
+                    page: 1,
+                    perPage: 10,
 
+                    // wizard
+                    step: 0,
+                    selected: null,
+                    ready: false,
+                    loading: false,
+
+                    // ui state
+                    banner: {
+                        error: '',
+                        warn: '',
+                        info: ''
+                    },
+                    routeShowTpl: '',
+                    routeGate: '',
+                    serverError: '',
+                    autosaveStatus: '',
+                    auditorNames: [],
+
+                    // validation & guidance
+                    touched: new Set(),
+                    unverifiedRequired: [],
+                    clientIssues: [],
+                    fieldLabels: {
+                        'dates.this_audit': 'This Audit Date',
+                        'dates.prior_official_status': 'Prior Official Status',
+                        'laboratory.name': 'Laboratory Name',
+                        'laboratory.country_id': 'Country ID',
+                        'laboratory.level_affiliation.level': 'Level',
+                        'laboratory.level_affiliation.affiliation': 'Affiliation'
+                    },
+
+                    // authoritative locks
+                    authoritative: {
+                        laboratory: {}
+                    },
+                    lockPaths: new Set(['laboratory.name', 'laboratory.lab_number', 'laboratory.country_id',
+                        'laboratory.country_name'
+                    ]),
+                    lockSelectorMap: {
+                        'laboratory.name': 'input[x-model="profile.laboratory.name"]',
+                        'laboratory.lab_number': 'input[x-model="profile.laboratory.lab_number"]',
+                        'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
+                        'laboratory.country_name': 'input[x-model="profile.laboratory.country_name"]'
+                    },
+
+                    // dictionaries
+                    levelOptions: ['national', 'regional', 'district', 'facility', 'private_ref'],
+                    affiliationOptions: ['public', 'private', 'faith_based', 'ngo', 'academic', 'military',
+                        'other'],
+                    staffingKeys: ['degree_professionals', 'diploma_professionals', 'certificate_professionals',
+                        'data_clerks', 'phlebotomists', 'cleaners', 'drivers_couriers'
+                    ],
+                    staffingLabels: {
+                        degree_professionals: 'Degree Professionals',
+                        diploma_professionals: 'Diploma Professionals',
+                        certificate_professionals: 'Certificate Professionals',
+                        data_clerks: 'Data Clerks',
+                        phlebotomists: 'Phlebotomists',
+                        cleaners: 'Cleaners',
+                        drivers_couriers: 'Drivers / Couriers'
+                    },
+
+                    // profile (unchanged contract)
+                    profile: {
+                        profile_version: 'v1',
+                        dates: {
+                            this_audit: '',
+                            last_audit: '',
+                            prior_official_status: 'not_audited'
+                        },
+                        auditors: [],
+                        laboratory: {
+                            name: '',
+                            lab_number: '',
+                            address: '',
+                            city: '',
+                            country_id: null,
+                            country_name: '',
+                            phone: '',
+                            fax: '',
+                            email: '',
+                            gps: {
+                                lat: null,
+                                lng: null
+                            },
+                            representative: {
+                                name: '',
+                                phone_work: '',
+                                phone_personal: ''
+                            },
+                            level_affiliation: {
+                                level: [],
+                                affiliation: [],
+                                other_note: ''
+                            }
+                        },
+                        staffing_summary: {
+                            degree_professionals: {
+                                count: 0,
+                                adequate: 'insufficient'
+                            },
+                            diploma_professionals: {
+                                count: 0,
+                                adequate: 'insufficient'
+                            },
+                            certificate_professionals: {
+                                count: 0,
+                                adequate: 'insufficient'
+                            },
+                            data_clerks: {
+                                count: 0,
+                                adequate: 'insufficient'
+                            },
+                            phlebotomists: {
+                                count: 0,
+                                adequate: 'insufficient'
+                            },
+                            cleaners: {
+                                count: 0,
+                                adequate: 'insufficient',
+                                dedicated: null,
+                                trained_safety_waste: null
+                            },
+                            drivers_couriers: {
+                                count: 0,
+                                adequate: 'insufficient',
+                                dedicated: null,
+                                trained_biosafety: null
+                            },
+                            other_roles: [],
+                            notes: ''
+                        }
+                    },
+
+                    // assistant copy
+                    get assistantTitle() {
+                        if (!this.selected) return 'Select an audit to begin.';
+                        if (this.ready) return 'Profile saved and ready.';
+                        return 'Verify and complete the audit profile.';
+                    },
+                    get assistantBody() {
+                        if (!this.selected) return 'Use the Browse list to pick a single in-progress audit.';
+                        if (this.unverifiedRequired.length)
+                        return 'Some required fields are prefilled or unverified. Confirm them before saving.';
+                        return this.ready ?
+                            'Everything necessary is present. You can still edit and re-save before entering.' :
+                            'Fill the important fields, then Save & Continue.';
+                    },
+
+                    // lifecycle
+                    init() {
+                        if (!el) {
+                            console.warn('auditWizardPremium: root element missing');
+                            return;
+                        }
+                        try {
+                            this.all = JSON.parse(el.getAttribute('data-audits') || '[]');
+                        } catch {
+                            this.all = [];
+                        }
+                        this.routeShowTpl = el.getAttribute('data-route-show') || '';
+                        this.routeGate = el.getAttribute('data-route-gate') || '';
+
+                        this.rebuildOptions();
+                        this.recompute();
+                        this.$watch('search', () => {
+                            this.page = 1;
+                            this.recompute();
+                        });
+                        this.$watch('country', () => {
+                            this.page = 1;
+                            this.recompute();
+                        });
+                        this.$watch('lab', () => {
+                            this.page = 1;
+                            this.recompute();
+                        });
+                        this.$watch('page', () => {
+                            this.recomputePage();
+                        });
+
+                        window.addEventListener('keydown', (e) => {
+                            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && this.step ===
+                                1) {
+                                e.preventDefault();
+                                this.saveProfile();
+                            }
+                        });
+
+                        this.banner.info = 'Select an audit to proceed.';
+                    },
+
+                    // filtering
+                    rebuildOptions() {
+                        const cs = {},
+                            ls = {};
+                        for (const a of this.all) {
+                            if (a?.country_name) cs[a.country_name] = true;
+                            if (a?.lab_name) ls[a.lab_name] = true;
+                        }
+                        this.countries = Object.keys(cs).sort();
+                        this.labs = Object.keys(ls).sort();
+                    },
+                    recompute() {
+                        const q = (this.search || '').toLowerCase().trim();
+                        const hit = v => (v == null ? '' : String(v)).toLowerCase().includes(q);
+                        const out = [];
+                        for (const a of this.all) {
+                            const byStatus = String(a.status || '').toLowerCase() === 'in_progress';
+                            const byQ = !q || hit(a.id) || hit(a.lab_name) || hit(a.lab_number) || hit(a
+                                .country_name);
+                            const byC = !this.country || a.country_name === this.country;
+                            const byL = !this.lab || a.lab_name === this.lab;
+                            if (byStatus && byQ && byC && byL) out.push(a);
+                        }
+                        this.filtered = out;
+                        const maxPage = Math.max(1, Math.ceil(this.filtered.length / this.perPage));
+                        if (this.page > maxPage) this.page = maxPage;
+                        this.recomputePage();
+                    },
+                    recomputePage() {
+                        const s = (this.page - 1) * this.perPage,
+                            e = this.page * this.perPage;
+                        this.paged = this.filtered.slice(s, e);
+                    },
+                    next() {
+                        if (this.page * this.perPage < this.filtered.length) this.page++;
+                    },
+                    prev() {
+                        if (this.page > 1) this.page--;
+                    },
+
+                    // selection
+                    async selectAudit(a) {
+                        // 1) Probe the server gate FIRST without mutating any UI state.
+                        try {
+                            const r = await fetch(this.routes.gate, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')
+                                        .content
+                                },
+                                body: JSON.stringify({
+                                    audit_id: a.id
+                                })
+                            });
+
+                            // If gate fails (e.g., 422 insufficient_auditors), do NOTHING.
+                            if (!r.ok) return;
+
+                            const res = await r.json().catch(() => ({}));
+                            if (res.ok === false) return; // safety: explicit server "not ok" => do NOTHING
+                        } catch (_) {
+                            return; // network or parse error => do NOTHING
+                        }
+
+                        // 2) Gate passed — now (and only now) change UI state.
+                        this.resetStateKeepList();
+                        this.selected = a;
+
+                        // If you rely on prefillFromGate to hydrate snapshot/auditors, keep it:
+                        await this.prefillFromGate();
+
+                        this.step = 1;
+                        this.$nextTick(() => this.applyReadOnlyLocks());
+                    },
+
+                    backToBrowse(reset = true) {
+                        if (reset) this.resetStateKeepList();
+                        this.step = 0;
+                        this.banner.info = 'Select an audit to proceed.';
+                    },
+
+                    // fetch prefill and authoritative
+                    async prefillFromGate() {
+                        if (!this.selected) return;
+                        try {
+                            this.loading = true;
+                            const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute(
+                                'content') || '';
+                            const body = new URLSearchParams({
+                                audit_id: String(this.selected.id)
+                            });
+
+                            const {
+                                ok,
+                                json,
+                                status,
+                                text
+                            } = await verboseFetch(this.routeGate, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                    'X-CSRF-TOKEN': token
+                                },
+                                body
+                            }, 'prefillFromGate');
+
+                            const data = json || {};
+                            if (!ok && !data.snapshot) {
+                                this.banner.error = data?.error ||
+                                    `Failed to load audit profile (HTTP ${status})`;
+                                return;
+                            }
+
+                            const snap = data.snapshot || {};
+                            const assigned = data.assigned_auditors || snap.auditors || [];
+                            this.auditorNames = assigned
+                                .map(a => a?.name ? [a.name, a.affiliation].filter(Boolean).join(' — ') : (a ||
+                                    ''))
+                                .filter(Boolean);
+
+                            this.ingestSnapshot(snap);
+
+                            this.authoritative.laboratory = (data.authoritative && data.authoritative
+                                    .laboratory) ?
+                                JSON.parse(JSON.stringify(data.authoritative.laboratory)) :
+                                JSON.parse(JSON.stringify(snap.laboratory || {}));
+
+                            this.reimposeAuthoritative();
+
+                            if (!Array.isArray(this.profile.auditors) || !this.profile.auditors.length) {
+                                this.profile.auditors = assigned.map(a => ({
+                                    name: a?.name || '',
+                                    affiliation: a?.affiliation || ''
+                                }));
+                            }
+
+                            this.computeGuidance();
+                            this.ready = (data.code === 'ready');
+                        } catch (err) {
+                            this.banner.error = 'Network error while loading profile';
+                        } finally {
+                            this.loading = false;
+                        }
+                    },
+
+                    // ingest helpers (unchanged)
+                    ingestSnapshot(s) {
+                        const put = (obj, path, val) => {
+                            const ks = path.split('.');
+                            let t = obj;
+                            for (let i = 0; i < ks.length - 1; i++) {
+                                const k = ks[i];
+                                t[k] = t[k] ?? {};
+                                t = t[k];
+                            }
+                            t[ks[ks.length - 1]] = val;
+                        };
+                        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
+
+                        ['dates.this_audit', 'dates.last_audit', 'dates.prior_official_status'].forEach(k => {
+                            const v = get(s, k);
+                            if (v !== undefined && v !== null) put(this.profile, k, v);
+                        });
+
+                        if (Array.isArray(s.auditors)) this.profile.auditors = s.auditors.filter(x => x && (x
+                            .name || x.affiliation));
+
+                        const lab = s.laboratory || {};
+                        ['name', 'lab_number', 'address', 'city', 'phone', 'fax', 'email', 'country_name'].forEach(
+                            k => {
+                                if (lab[k] !== undefined && lab[k] !== null) this.profile.laboratory[k] = lab[
+                                k];
+                            });
+                        if (lab.country_id !== undefined && lab.country_id !== null) this.profile.laboratory
+                            .country_id = Number(lab.country_id);
+                        if (lab.gps) {
+                            if (lab.gps.lat !== undefined) this.profile.laboratory.gps.lat = Number(lab.gps.lat);
+                            if (lab.gps.lng !== undefined) this.profile.laboratory.gps.lng = Number(lab.gps.lng);
+                        }
+                        if (lab.representative) {
+                            const r = lab.representative;
+                            if (r.name !== undefined) this.profile.laboratory.representative.name = r.name || '';
+                            if (r.phone_work !== undefined) this.profile.laboratory.representative.phone_work = r
+                                .phone_work || '';
+                            if (r.phone_personal !== undefined) this.profile.laboratory.representative
+                                .phone_personal = r.phone_personal || '';
+                        }
+                        if (lab.level_affiliation) {
+                            const la = lab.level_affiliation;
+                            if (Array.isArray(la.level)) this.profile.laboratory.level_affiliation.level = [...
+                                new Set(la.level)
+                            ];
+                            if (Array.isArray(la.affiliation)) this.profile.laboratory.level_affiliation
+                                .affiliation = [...new Set(la.affiliation)];
+                            if (la.other_note !== undefined) this.profile.laboratory.level_affiliation.other_note =
+                                la.other_note || '';
+                        }
+
+                        const ss = s.staffing_summary || {};
+                        for (const rk of this.staffingKeys) {
+                            const node = ss[rk];
+                            if (!node) continue;
+                            if (node.count !== undefined) this.profile.staffing_summary[rk].count = Math.max(0,
+                                parseInt(node.count || 0, 10));
+                            if (node.adequate && ['yes', 'no', 'insufficient'].includes(node.adequate)) this.profile
+                                .staffing_summary[rk].adequate = node.adequate;
+                            ['dedicated', 'trained_safety_waste', 'trained_biosafety'].forEach(f => {
+                                if (node[f] !== undefined) this.profile.staffing_summary[rk][f] = (node[
+                                    f] === true || node[f] === '1');
+                            });
+                        }
+                        if (Array.isArray(ss.other_roles)) {
+                            this.profile.staffing_summary.other_roles = ss.other_roles.map(or => ({
+                                role: or.role || '',
+                                count: Math.max(0, parseInt(or.count || 0, 10)),
+                                adequate: ['yes', 'no', 'insufficient'].includes(or.adequate) ? or
+                                    .adequate : 'insufficient',
+                                note: or.note || ''
+                            }));
+                        }
+                        if (ss.notes !== undefined) this.profile.staffing_summary.notes = ss.notes || '';
+                    },
+
+                    // locks
+                    isLocked(path) {
+                        return this.lockPaths.has(path);
+                    },
+                    reimposeAuthoritative() {
+                        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
+                        const put = (obj, path, val) => {
+                            const ks = path.split('.');
+                            let t = obj;
+                            for (let i = 0; i < ks.length - 1; i++) {
+                                const k = ks[i];
+                                t[k] = t[k] ?? {};
+                                t = t[k];
+                            }
+                            t[ks[ks.length - 1]] = val;
+                        };
+                        let reverted = [];
+                        for (const path of this.lockPaths) {
+                            const authVal = get(this.authoritative, path);
+                            if (authVal === undefined) continue;
+                            const curVal = get(this.profile, path);
+                            if (String(curVal) !== String(authVal)) {
+                                put(this.profile, path, authVal);
+                                reverted.push(this.fieldLabels[path] || path);
+                            }
+                        }
+                        if (reverted.length) this.banner.info =
+                            `Authoritative fields enforced: ${reverted.join(', ')}.`;
+                    },
+                    applyReadOnlyLocks() {
+                        const form = this.$refs.profileForm;
+                        if (!form) return;
+                        for (const path of this.lockPaths) {
+                            const sel = this.lockSelectorMap[path];
+                            if (!sel) continue;
+                            const el = form.querySelector(sel);
+                            if (!el) continue;
+                            el.readOnly = true;
+                            el.classList.add('bg-neutral-100', 'text-neutral-700', 'cursor-not-allowed');
+                            el.setAttribute('aria-readonly', 'true');
+                            el.addEventListener('input', () => this.reimposeAuthoritative(), {
+                                passive: true
+                            });
+                            el.addEventListener('focus', () => {
+                                this.banner.warn =
+                                    'This field is locked to authoritative data. To change, update it in the master tables.';
+                                setTimeout(() => {
+                                    if (this.banner.warn?.startsWith('This field is locked')) this
+                                        .banner.warn = '';
+                                }, 2500);
+                            });
+                        }
+                    },
+
+                    // guidance
+                    trackTouch(path) {
+                        this.touched.add(path);
+                        this.computeGuidance();
+                        this.autoSave();
+                    },
+                    computeGuidance() {
+                        const required = [
+                            'dates.this_audit',
+                            'dates.prior_official_status',
+                            'laboratory.name',
+                            'laboratory.country_id',
+                            'laboratory.level_affiliation.level',
+                            'laboratory.level_affiliation.affiliation'
+                        ];
+                        const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
+                        const isEmpty = (v) => v === undefined || v === null || (typeof v === 'string' && v
+                        .trim() === '') || (Array.isArray(v) && v.length === 0);
+
+                        this.unverifiedRequired = required.filter(k => !this.touched.has(k));
+
+                        const issues = [];
+                        for (const key of required) {
+                            const value = get(this.profile, key);
+                            if (isEmpty(value)) {
+                                issues.push({
+                                    path: key,
+                                    label: this.fieldLabels[key] || key,
+                                    severity: this.touched.has(key) ? 'warn' : 'info',
+                                    hint: this.buildHintFor(key)
+                                });
+                            }
+                        }
+                        this.clientIssues = issues;
+                        if (issues.length) {
+                            const names = issues.map(i => i.label).join(', ');
+                            this.banner.warn =
+                                `Missing or unverified: ${names}. Saved anyway; review for completeness.`;
+                        } else if (this.banner.warn?.startsWith('Missing or unverified:')) {
+                            this.banner.warn = '';
+                        }
+                    },
+                    buildHintFor(key) {
+                        switch (key) {
+                            case 'dates.this_audit':
+                                return 'Enter the current audit date (YYYY-MM-DD).';
+                            case 'dates.prior_official_status':
+                                return 'Pick the previous official star status.';
+                            case 'laboratory.name':
+                                return 'This is locked to the master record.';
+                            case 'laboratory.country_id':
+                                return 'Numeric country ID from your master data.';
+                            case 'laboratory.level_affiliation.level':
+                                return 'Pick at least one level.';
+                            case 'laboratory.level_affiliation.affiliation':
+                                return 'Pick at least one affiliation.';
+                            default:
+                                return '';
+                        }
+                    },
+                    focusFirstIssue() {
+                        const map = {
+                            'dates.this_audit': 'input[type="date"][x-model="profile.dates.this_audit"]',
+                            'dates.prior_official_status': 'select[x-model="profile.dates.prior_official_status"]',
+                            'laboratory.name': 'input[x-model="profile.laboratory.name"]',
+                            'laboratory.country_id': 'input[x-model="profile.laboratory.country_id"]',
+                            'laboratory.level_affiliation.level': 'input[x-model*="profile.laboratory.level_affiliation.level"]',
+                            'laboratory.level_affiliation.affiliation': 'input[x-model*="profile.laboratory.level_affiliation.affiliation"]'
+                        };
+                        const first = this.clientIssues[0];
+                        if (!first) return;
+                        const sel = map[first.path];
+                        const el = this.$refs.profileForm?.querySelector(sel);
+                        if (el) el.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'center'
+                        });
+                    },
+
+                    // autosave
+                    autosaveTimer: null,
+                    autoSave() {
+                        clearTimeout(this.autosaveTimer);
+                        this.autosaveTimer = setTimeout(() => this.saveDraft(), 800);
+                    },
+                    async saveDraft() {
+                        if (!this.selected) return;
+                        this.reimposeAuthoritative();
+                        this.autosaveStatus = 'Saving draft…';
+                        try {
+                            const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute(
+                                'content') || '';
+                            const payload = this.serializeProfile();
+                            const {
+                                ok
+                            } = await verboseFetch(this.routeGate, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                    'X-CSRF-TOKEN': token
+                                },
+                                body: payload
+                            }, 'autosaveDraft');
+                            if (ok) {
+                                this.autosaveStatus = 'Draft saved.';
+                                setTimeout(() => {
+                                    this.autosaveStatus = '';
+                                }, 1500);
+                            } else {
+                                this.autosaveStatus = '';
+                            }
+                        } catch {
+                            this.autosaveStatus = '';
+                        }
+                    },
+
+                    // save (non-blocking) + authoritative re-imposition
+                    async saveProfile() {
+                        if (!this.selected) return;
+
+                        this.computeGuidance();
+                        if (this.clientIssues.length) this.$nextTick(() => this.focusFirstIssue());
+
+                        this.reimposeAuthoritative();
+
+                        this.serverError = '';
+                        this.banner.error = '';
+                        this.loading = true;
+                        try {
+                            const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute(
+                                'content') || '';
+                            const payload = this.serializeProfile();
+                            const {
+                                ok,
+                                json,
+                                status
+                            } = await verboseFetch(this.routeGate, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                    'X-CSRF-TOKEN': token
+                                },
+                                body: payload
+                            }, 'saveProfile');
+
+                            const data = json || {};
+                            if (ok && (data.ok || data.code === 'ready')) {
+                                if (data.snapshot?.auditors) {
+                                    this.auditorNames = data.snapshot.auditors.map(a => [a.name, a.affiliation]
+                                        .filter(Boolean).join(' — '));
+                                }
+                                this.ready = (data.code === 'ready');
+                                if (this.ready) {
+                                    this.step = 2;
+                                    this.banner.warn = '';
+                                    this.clientIssues = [];
+                                    this.unverifiedRequired = [];
+                                } else {
+                                    this.banner.info = 'Saved. You may continue refining before entering.';
+                                }
+                            } else {
+                                this.serverError = data?.error || `Failed to save profile (HTTP ${status})`;
+                                if (Array.isArray(data?.missing) && data.missing.length) {
+                                    this.banner.warn =
+                                        `Server indicates missing: ${data.missing.join(', ')}. Review and save again.`;
+                                }
+                                this.$nextTick(() => this.focusFirstIssue());
+                            }
+                        } catch {
+                            this.serverError = 'Network error during save';
+                        } finally {
+                            this.loading = false;
+                        }
+                    },
+
+                    // serialization (unchanged contract)
+                    serializeProfile() {
+                        const params = new URLSearchParams();
+                        params.append('audit_id', String(this.selected.id));
+                        const flatten = (obj, prefix = 'profile') => {
+                            for (const key in obj) {
+                                const value = obj[key];
+                                const fullKey = `${prefix}[${key}]`;
+                                if (value === null || value === undefined) {
+                                    params.append(fullKey, '');
+                                } else if (Array.isArray(value)) {
+                                    if (value.length === 0) {
+                                        params.append(fullKey, '');
+                                        continue;
+                                    }
+                                    if (typeof value[0] === 'object') value.forEach((item, i) => flatten(item,
+                                        `${fullKey}[${i}]`));
+                                    else value.forEach(v => params.append(`${fullKey}[]`, v));
+                                } else if (typeof value === 'object') {
+                                    flatten(value, fullKey);
+                                } else {
+                                    params.append(fullKey, String(value));
+                                }
+                            }
+                        };
+                        flatten(this.profile, 'profile');
+                        return params;
+                    },
+
+                    // rows
+                    addAuditor() {
+                        this.profile.auditors.push({
+                            name: '',
+                            affiliation: ''
+                        });
+                        this.autoSave();
+                    },
+                    removeAuditor(i) {
+                        this.profile.auditors.splice(i, 1);
+                        this.autoSave();
+                    },
+                    addOtherRole() {
+                        this.profile.staffing_summary.other_roles.push({
+                            role: '',
+                            count: 0,
+                            adequate: 'insufficient',
+                            note: ''
+                        });
+                        this.autoSave();
+                    },
+                    removeOtherRole(i) {
+                        this.profile.staffing_summary.other_roles.splice(i, 1);
+                        this.autoSave();
+                    },
+
+                    // helpers
+                    routeShow(id) {
+                        return (this.routeShowTpl || '').replace('__ID__', encodeURIComponent(id));
+                    },
+                    hardRefresh() {
+                        window.location.reload();
+                    },
+                    resetStateKeepList() {
+                        this.selected = null;
+                        this.ready = false;
+                        this.banner = {
+                            error: '',
+                            warn: '',
+                            info: ''
+                        };
+                        this.serverError = '';
+                        this.autosaveStatus = '';
+                        this.auditorNames = [];
+                        this.touched = new Set();
+                        this.unverifiedRequired = [];
+                        this.clientIssues = [];
+                        this.authoritative = {
+                            laboratory: {}
+                        };
+                        this.profile = {
+                            profile_version: 'v1',
+                            dates: {
+                                this_audit: '',
+                                last_audit: '',
+                                prior_official_status: 'not_audited'
+                            },
+                            auditors: [],
+                            laboratory: {
+                                name: '',
+                                lab_number: '',
+                                address: '',
+                                city: '',
+                                country_id: null,
+                                country_name: '',
+                                phone: '',
+                                fax: '',
+                                email: '',
+                                gps: {
+                                    lat: null,
+                                    lng: null
+                                },
+                                representative: {
+                                    name: '',
+                                    phone_work: '',
+                                    phone_personal: ''
+                                },
+                                level_affiliation: {
+                                    level: [],
+                                    affiliation: [],
+                                    other_note: ''
+                                }
+                            },
+                            staffing_summary: {
+                                degree_professionals: {
+                                    count: 0,
+                                    adequate: 'insufficient'
+                                },
+                                diploma_professionals: {
+                                    count: 0,
+                                    adequate: 'insufficient'
+                                },
+                                certificate_professionals: {
+                                    count: 0,
+                                    adequate: 'insufficient'
+                                },
+                                data_clerks: {
+                                    count: 0,
+                                    adequate: 'insufficient'
+                                },
+                                phlebotomists: {
+                                    count: 0,
+                                    adequate: 'insufficient'
+                                },
+                                cleaners: {
+                                    count: 0,
+                                    adequate: 'insufficient',
+                                    dedicated: null,
+                                    trained_safety_waste: null
+                                },
+                                drivers_couriers: {
+                                    count: 0,
+                                    adequate: 'insufficient',
+                                    dedicated: null,
+                                    trained_biosafety: null
+                                },
+                                other_roles: [],
+                                notes: ''
+                            }
+                        };
+                    }
+                };
+            };
+        })();
+    </script>
 @endsection

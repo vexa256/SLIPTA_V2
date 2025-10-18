@@ -1,6 +1,35 @@
 @extends('layouts.app')
 
 @section('content')
+
+@php
+use Illuminate\Support\Facades\DB;
+
+/**
+ * Surgical view-side filter:
+ * - Reads the IDs already provided in $audits by the controller
+ * - Queries team sizes with the query builder
+ * - Keeps only audits with team_count >= 2
+ * - Leaves the item structure unchanged for the rest of the view
+ */
+$ids = collect($audits ?? [])->pluck('id')->all();
+
+if (!empty($ids)) {
+    // team_count per audit (manual query builder)
+    $teamCounts = DB::table('audit_team_members')
+        ->selectRaw('audit_id, COUNT(*) as team_count')
+        ->whereIn('audit_id', $ids)
+        ->groupBy('audit_id')
+        ->pluck('team_count', 'audit_id');
+
+    // filter the already-loaded $audits in-memory using those counts
+    $audits = collect($audits)->filter(function ($a) use ($teamCounts) {
+        $count = (int) ($teamCounts[$a->id] ?? 0);
+        return $count >= 2;
+    })->values();
+}
+@endphp
+
     <div class="min-h-screen bg-neutral-50" x-data="auditWizardPremium($el)" data-audits='@json($audits ?? [])'
         data-route-show="{{ route('audits.show', ['auditId' => '__ID__']) }}"
         data-route-gate="{{ route('audits.select.gate') }}">

@@ -17,7 +17,7 @@
                             </svg>
                         </div>
                         <div>
-                            <h1 class="text-base sm:text-lg font-semibold text-neutral-900 tracking-tight">SLIPTA Audits
+                            <h1 class="text-base sm:text-lg font-semibold text-neutral-900 tracking-tight">SLIPTA Audits (Only Audits with more than one team member are shown)
                             </h1>
                             <p class="text-xs text-neutral-500 hidden sm:block">Select → Verify → Enter</p>
                         </div>

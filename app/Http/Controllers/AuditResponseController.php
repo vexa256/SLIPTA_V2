@@ -1064,32 +1064,55 @@ public function index(Request $request)
             ->exists();
     }
 
-    protected function getScopedInProgressAudits(array $ctx)
-    {
-        $q = DB::table('audits as a')
-            ->join('laboratories as l', 'a.laboratory_id', '=', 'l.id')
-            ->join('countries as c', 'l.country_id', '=', 'c.id')
-            ->leftJoin('audit_team_members as atm', function ($j) use ($ctx) {
-                $j->on('atm.audit_id', '=', 'a.id')
-                    ->where('atm.user_id', $ctx['user']->id);
-            })
-            ->whereRaw('LOWER(a.status) = ?', ['in_progress'])
-            ->select('a.*', 'l.name as lab_name', 'l.lab_number', 'l.country_id', 'c.name as country_name');
+   // Replace the whole method with this
+protected function getScopedInProgressAudits(array $ctx)
+{
+    // Pre-aggregate team sizes per audit (fast + safe)
+    $teamCounts = DB::table('audit_team_members')
+        ->selectRaw('audit_id, COUNT(*) AS team_count')
+        ->groupBy('audit_id');
 
-        if ($ctx['has_global_view']) {
-            return $q;
-        }
+    $q = DB::table('audits as a')
+        ->join('laboratories as l', 'a.laboratory_id', '=', 'l.id')
+        ->join('countries as c', 'l.country_id', '=', 'c.id')
+        // Join team counts, then hard-filter to at least 2 members
+        ->leftJoinSub($teamCounts, 'tc', function ($j) {
+            $j->on('tc.audit_id', '=', 'a.id');
+        })
+        // Keep the existing personal-team join for scoping (unchanged)
+        ->leftJoin('audit_team_members as atm', function ($j) use ($ctx) {
+            $j->on('atm.audit_id', '=', 'a.id')
+              ->where('atm.user_id', $ctx['user']->id);
+        })
+        ->whereRaw('LOWER(a.status) = ?', ['in_progress'])
+        // 🔒 Block audits with < 2 team members from ever appearing
+        ->whereRaw('COALESCE(tc.team_count, 0) >= 2')
+        // IMPORTANT: keep the exact same columns the view expects
+        ->select(
+            'a.*',
+            'l.name as lab_name',
+            'l.lab_number',
+            'l.country_id',
+            'c.name as country_name'
+        );
 
-        if (! empty($ctx['is_country_coord']) && ! empty($ctx['country_ids'])) {
-            $q->whereIn('l.country_id', $ctx['country_ids']);
-        } else {
-            $q->where(function ($w) use ($ctx) {
-                $w->whereNotNull('atm.user_id');
-                if (! empty($ctx['laboratory_ids'])) {
-                    $w->orWhereIn('a.laboratory_id', $ctx['laboratory_ids']);
-                }
-            });
-        }
+    // Preserve the original scoping logic (unchanged)
+    if ($ctx['has_global_view']) {
         return $q;
     }
+
+    if (!empty($ctx['is_country_coord']) && !empty($ctx['country_ids'])) {
+        $q->whereIn('l.country_id', $ctx['country_ids']);
+    } else {
+        $q->where(function ($w) use ($ctx) {
+            $w->whereNotNull('atm.user_id');
+            if (!empty($ctx['laboratory_ids'])) {
+                $w->orWhereIn('a.laboratory_id', $ctx['laboratory_ids']);
+            }
+        });
+    }
+
+    return $q;
+}
+
 }

@@ -1093,16 +1093,34 @@
       prev() { if (this.page > 1) this.page--; },
 
       // selection
-      async selectAudit(a) {
-        this.resetStateKeepList();
-        this.selected = a;
-        this.step = 1;
-        this.banner.info = 'Preparing profile…';
-        await this.prefillFromGate();
-        this.banner.info = '';
-        this.banner.warn = this.auditorNames.length ? '' : 'No auditors are assigned. Assignment is required before entering.';
-        this.$nextTick(() => this.applyReadOnlyLocks());
-      },
+     async selectAudit(a) {
+  this.resetStateKeepList();
+  this.selected = a;
+  this.banner.info = 'Preparing profile…';
+
+  try {
+    // wait for the gate to pass before moving steps
+    const gateOk = await this.prefillFromGate(); // if this returns nothing, it's fine — success path won't throw
+
+    this.banner.info = '';
+
+    // only advance after a successful gate
+    this.step = 1;
+
+    // require at least 2 members (not just "any")
+    this.banner.warn = (this.auditorNames?.length || 0) < 2
+      ? 'At least 2 team members are required.'
+      : '';
+
+    this.$nextTick(() => this.applyReadOnlyLocks());
+  } catch (e) {
+    // gate failed (e.g., 422 insufficient_auditors or network)
+    this.banner.info = '';
+    this.banner.warn = e?.message || 'This audit cannot be opened (likely under-staffed).';
+    // keep user on Browse (step stays 0)
+  }
+}
+,
 
       backToBrowse(reset = true) {
         if (reset) this.resetStateKeepList();

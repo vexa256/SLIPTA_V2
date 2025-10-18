@@ -1067,27 +1067,26 @@ public function index(Request $request)
    // Replace the whole method with this
 protected function getScopedInProgressAudits(array $ctx)
 {
-    // Pre-aggregate team sizes per audit (fast + safe)
-    $teamCounts = DB::table('audit_team_members')
-        ->selectRaw('audit_id, COUNT(*) AS team_count')
-        ->groupBy('audit_id');
-
     $q = DB::table('audits as a')
         ->join('laboratories as l', 'a.laboratory_id', '=', 'l.id')
         ->join('countries as c', 'l.country_id', '=', 'c.id')
-        // Join team counts, then hard-filter to at least 2 members
-        ->leftJoinSub($teamCounts, 'tc', function ($j) {
-            $j->on('tc.audit_id', '=', 'a.id');
-        })
-        // Keep the existing personal-team join for scoping (unchanged)
+        // keep personal-team join for scoping (unchanged)
         ->leftJoin('audit_team_members as atm', function ($j) use ($ctx) {
             $j->on('atm.audit_id', '=', 'a.id')
               ->where('atm.user_id', $ctx['user']->id);
         })
         ->whereRaw('LOWER(a.status) = ?', ['in_progress'])
-        // 🔒 Block audits with < 2 team members from ever appearing
-        ->whereRaw('COALESCE(tc.team_count, 0) >= 2')
-        // IMPORTANT: keep the exact same columns the view expects
+
+        // ✅ Hard filter: only audits with >= 2 team members exist
+        ->whereExists(function ($sub) {
+            $sub->from('audit_team_members as t')
+                ->select(DB::raw('1'))
+                ->whereColumn('t.audit_id', 'a.id')
+                ->groupBy('t.audit_id')
+                ->havingRaw('COUNT(*) >= 2');
+        })
+
+        // keep EXACT columns the view expects
         ->select(
             'a.*',
             'l.name as lab_name',
@@ -1096,7 +1095,7 @@ protected function getScopedInProgressAudits(array $ctx)
             'c.name as country_name'
         );
 
-    // Preserve the original scoping logic (unchanged)
+    // original scoping logic (unchanged)
     if ($ctx['has_global_view']) {
         return $q;
     }
@@ -1114,5 +1113,6 @@ protected function getScopedInProgressAudits(array $ctx)
 
     return $q;
 }
+
 
 }
